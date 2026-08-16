@@ -1,0 +1,29 @@
+name: Build USB AN TOAN (1 file EXE)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Tai code ve
+        uses: actions/checkout@v4
+
+      - name: Cai Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cai thu vien
+        run: pip install PyQt5 cryptography pyinstaller
+
+      - name: Build 1 file EXE
+        run: pyinstaller --onefile --windowed --name USB_AN_TOAN_Setup --clean --noconfirm vault_drive.py
+
+      - name: Tai file EXE len
+        uses: actions/upload-artifact@v4
+        with:
+          name: USB_AN_TOAN_Setup_EXE
+          path: dist/USB_AN_TOAN_Setup.exe
