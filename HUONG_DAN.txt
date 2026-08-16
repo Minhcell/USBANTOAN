@@ -1,0 +1,62 @@
+================================================================
+  BUILD 1 FILE EXE TREN GITHUB (KHONG CAI GI, KHONG RANH CODE)
+================================================================
+
+Ket qua: 1 file duy nhat USB_AN_TOAN_Setup.exe (~50MB)
+
+----------------------------------------------------------------
+BUOC 1: Tao tai khoan GitHub (neu chua co)
+----------------------------------------------------------------
+Vao https://github.com > Sign up (mien phi)
+
+----------------------------------------------------------------
+BUOC 2: Tao Repository
+----------------------------------------------------------------
+1. Bam dau + goc phai > New repository
+2. Dat ten bat ky (vd: usb-an-toan) > Create repository
+
+----------------------------------------------------------------
+BUOC 3: Upload code
+----------------------------------------------------------------
+1. Bam "uploading an existing file"
+2. GIAI NEN file nay, keo CA 2 thu: 
+   - file vault_drive.py
+   - thu muc .github (co the an, bat hien file an de thay)
+   vao khung upload
+3. Bam "Commit changes"
+
+   * Neu khong keo duoc thu muc .github:
+     - Bam "Add file" > "Create new file"
+     - Go ten file: .github/workflows/build.yml
+     - Dan noi dung file build.yml vao
+     - Commit
+
+----------------------------------------------------------------
+BUOC 4: Cho build (5-7 phut)
+----------------------------------------------------------------
+1. Vao tab "Actions"
+2. Cho den khi co dau tich XANH
+
+----------------------------------------------------------------
+BUOC 5: Tai file EXE
+----------------------------------------------------------------
+1. Bam vao lan build xong (tich xanh)
+2. Keo xuong muc "Artifacts"
+3. Tai "USB_AN_TOAN_Setup_EXE" > giai nen
+4. Co 1 file: USB_AN_TOAN_Setup.exe
+
+----------------------------------------------------------------
+BUOC 6: Dung
+----------------------------------------------------------------
+1. Chuot phai USB_AN_TOAN_Setup.exe > Run as administrator
+2. Chon USB > dat mat khau > KHOI TAO
+3. Rut USB, cam lai > chay USB_AN_TOAN.exe tren USB
+
+----------------------------------------------------------------
+CHAY LAI (sau khi sua code):
+----------------------------------------------------------------
+Tab Actions > bam ten workflow ben trai > Run workflow
+
+================================================================
+Mat khau Admin mac dinh: M@nh6868
+================================================================
