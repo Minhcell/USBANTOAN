@@ -700,10 +700,12 @@ def du():
     if drv and os.path.exists(os.path.join(drv+os.sep,CF)):return drv+os.sep
     return None
 def fs(n):
-    for u in["B","KB","MB","GB","TB"]:
-        if n<1024:return f"{n:.0f}{u}"
+    n=float(n)
+    if n<1024:return f"{n:.0f} B"
+    for u in["KB","MB","GB","TB"]:
         n/=1024
-    return f"{n:.0f}PB"
+        if n<1024:return f"{n:.3f} {u}"
+    return f"{n:.3f} PB"
 def is_admin():
     try:return ctypes.windll.shell32.IsUserAnAdmin()!=0
     except:return False
@@ -894,7 +896,7 @@ class MW(QMainWindow):
         s.tp.setSelectionMode(QAbstractItemView.ExtendedSelection);s.tp.setRootIsDecorated(False)
         s.tp.header().setSectionResizeMode(0,QHeaderView.Stretch)
         s.tp.setColumnWidth(1,90);s.tp.setColumnWidth(2,90);s.tp.setColumnWidth(3,150)
-        s.tp.itemDoubleClicked.connect(s.pdbl);pl.addWidget(s.tp)
+        s.tp.itemDoubleClicked.connect(s.pdbl);s.tp.itemSelectionChanged.connect(s._pc_sel_size);pl.addWidget(s.tp)
         s.pc_stat=QLabel("0 thư mục, 0 file");s.pc_stat.setStyleSheet("font-size:13px;color:#404040;padding:2px;");pl.addWidget(s.pc_stat)
         bl_.addWidget(pc,stretch=1)
 
@@ -924,7 +926,7 @@ class MW(QMainWindow):
         s.tu.setSelectionMode(QAbstractItemView.ExtendedSelection);s.tu.setRootIsDecorated(False)
         s.tu.header().setSectionResizeMode(0,QHeaderView.Stretch)
         s.tu.setColumnWidth(1,90);s.tu.setColumnWidth(2,90);s.tu.setColumnWidth(3,150)
-        s.tu.itemDoubleClicked.connect(s.udbl);ul.addWidget(s.tu)
+        s.tu.itemDoubleClicked.connect(s.udbl);s.tu.itemSelectionChanged.connect(s._usb_sel_size);ul.addWidget(s.tu)
         s.usb_stat=QLabel("0 thư mục, 0 file");s.usb_stat.setStyleSheet("font-size:13px;color:#404040;padding:2px;");ul.addWidget(s.usb_stat)
         bl_.addWidget(ub,stretch=1)
 
@@ -937,7 +939,64 @@ class MW(QMainWindow):
         s.stop_btn.setStyleSheet("QPushButton{background:#e53935;color:white;font-weight:bold;border:none;border-radius:4px;padding:6px 18px;}QPushButton:hover{background:#f44336;}")
         s.stop_btn.clicked.connect(s._stop_copy);prl.addWidget(s.stop_btn)
         s.prow=prow;prow.setVisible(False);rt.addWidget(prow)
+        # Dong hien dung luong muc dang chon (duoi dong % copy)
+        s.sel_lbl=QLabel("")
+        s.sel_lbl.setStyleSheet("font-size:13px;color:#333;padding:3px 10px;background:#f5f5f5;border-top:1px solid #e0e0e0;")
+        s.sel_lbl.setVisible(False);rt.addWidget(s.sel_lbl)
         s.statusBar().showMessage("USB AN TOÀN - AES-256 | Dữ liệu ẩn, chặn copy trực tiếp")
+
+    def _pc_sel_size(s):
+        """Hien dung luong cua file/thu muc dang chon ben PC (duoi dong % copy)."""
+        items=s.tp.selectedItems()
+        total=0;nf=0;nd=0
+        for it in items:
+            fp=it.data(0,Qt.UserRole)
+            if not fp or it.data(0,Qt.UserRole+2)=="up":continue
+            if it.data(0,Qt.UserRole+1):  # thu muc
+                nd+=1
+                try:
+                    for root,_,files in os.walk(fp):
+                        for fn in files:
+                            try:total+=os.path.getsize(os.path.join(root,fn))
+                            except:pass
+                except:pass
+            else:
+                nf+=1
+                try:total+=os.path.getsize(fp)
+                except:pass
+        if nf==0 and nd==0:
+            s.sel_lbl.setVisible(False);s.sel_lbl.setText("");return
+        parts=[]
+        if nd:parts.append(f"{nd} thư mục")
+        if nf:parts.append(f"{nf} file")
+        s.sel_lbl.setText(f"Đã chọn (PC) — {', '.join(parts)}:  {fs(total)}")
+        s.sel_lbl.setVisible(True)
+
+    def _usb_sel_size(s):
+        """Hien dung luong cua file/thu muc dang chon ben USB."""
+        if not s.sfs:return
+        items=s.tu.selectedItems()
+        total=0;nf=0;nd=0
+        allf=s.sfs.list_files()
+        for it in items:
+            nm=it.data(0,Qt.UserRole)
+            if nm=="..":continue
+            if it.data(0,Qt.UserRole+1):  # thu muc ao
+                nd+=1
+                fold=((s.usb_path+"/")if s.usb_path else"")+nm+"/"
+                for fn,sz in allf:
+                    if fn.startswith(fold)and not fn.endswith("/.keep"):total+=sz
+            elif nm:
+                nf+=1
+                for fn,sz in allf:
+                    if fn==nm:total+=sz;break
+        if nf==0 and nd==0:
+            s.sel_lbl.setVisible(False);s.sel_lbl.setText("");return
+        parts=[]
+        if nd:parts.append(f"{nd} thư mục")
+        if nf:parts.append(f"{nf} file")
+        s.sel_lbl.setText(f"Đã chọn (USB) — {', '.join(parts)}:  {fs(total)}")
+        s.sel_lbl.setVisible(True)
 
     def _pc_locations(s):
         # Danh sach vi tri ben PC: Desktop + cac o dia
