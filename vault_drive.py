@@ -220,12 +220,69 @@ class USBGuard(QThread):
             except:pass
             time.sleep(0.5)  # Quet nhanh hon (2 lan/giay)
 
+class CopyWorker(QThread):
+    """Copy tren luong NEN -> I/O chay full toc do, khong bi UI can.
+    Cap nhat % gian cach theo thoi gian (0.2s) qua signal."""
+    progress=pyqtSignal(float,float,float,str)  # done_bytes, total_bytes, speed_Bps, name
+    finished_all=pyqtSignal(int,int,bool)       # ok_count, total_count, stopped
+    error=pyqtSignal(str)
+    def __init__(s,sfs,jobs,direction,dest_dir=None):
+        super().__init__()
+        s.sfs=sfs;s.jobs=jobs;s.direction=direction;s.dest=dest_dir;s._stop=False
+    def stop(s):s._stop=True
+    def run(s):
+        total_bytes=max(1.0,float(sum(j.get("size",0)for j in s.jobs)))
+        done=[0.0];ok=0;t0=time.time();last=[0.0]
+        def emit(cur,name):
+            now=time.time()
+            if now-last[0]>=0.2 or cur>=total_bytes:
+                last[0]=now
+                sp=cur/max(0.001,now-t0)
+                s.progress.emit(float(cur),total_bytes,sp,name)
+        for j in s.jobs:
+            if s._stop:break
+            name=j["name"]
+            try:
+                if s.direction=="to_usb":
+                    if j.get("marker"):
+                        s.sfs.write_file(name,b"")
+                    else:
+                        base=done[0]
+                        def prog(d,t,_b=base,_n=name):
+                            done[0]=_b+d;emit(done[0],_n)
+                        okk=s.sfs.write_file_stream(name,j["src"],progress=prog,stop_check=lambda:s._stop)
+                        done[0]=base+j.get("size",0)
+                        if not okk and s._stop:break
+                else:  # from_usb
+                    out=j["out"]
+                    d=os.path.dirname(out)
+                    if d:os.makedirs(d,exist_ok=True)
+                    b,e=os.path.splitext(out);c=1
+                    while os.path.exists(out):out=f"{b}({c}){e}";c+=1
+                    base=done[0]
+                    if s.sfs.is_stream_file(name):
+                        def prog(d,t,_b=base,_n=name):
+                            done[0]=_b+d;emit(done[0],_n)
+                        okk=s.sfs.read_file_stream(name,out,progress=prog,stop_check=lambda:s._stop)
+                        done[0]=base+j.get("size",0)
+                        if not okk and s._stop:break
+                    else:
+                        data=s.sfs.read_file(name)
+                        with open(out,"wb")as f:f.write(data if data else b"")
+                        done[0]=base+j.get("size",0);emit(done[0],name)
+                ok+=1
+            except Exception as ex:
+                s.error.emit(f"{name}: {ex}")
+        s.finished_all.emit(ok,len(s.jobs),s._stop)
+
+
 class SectorFS:
     """File system truc tiep tren sector - KHONG mount."""
     def __init__(s,dn,part_offset):
         s.dn=dn;s.off=part_offset;s.h=None;s.files=[]
         s._max_tbl_sec=TBL_START  # sector table cao nhat da tung ghi
     def open(s):s.h=disk_open(s.dn);s._read_tbl()
+
     def close(s):
         if s.h:disk_close(s.h);s.h=None
     def _as(s,rs):return s.off+rs
@@ -267,33 +324,31 @@ class SectorFS:
         if not s.files:return DATA_START
         return max(f.sec+((f.esz+SECTOR-1)//SECTOR)+4 for f in s.files if f.act)
 
-    def write_file_stream(s,name,src_path,progress=None):
-        """Ghi file theo luong KHONG ma hoa - TOI UU TOC DO cho USB 2.0/3.0.
-        - Sector dau: header 'SRAW'+size (512B, can chinh).
-        - Du lieu ghi tu sector ke tiep theo KHOI 4MB (1 WriteFile/khoi),
-          seek 1 lan, dung lai 1 buffer can chinh -> nhanh gap nhieu lan
-          so voi ghi tung 64KB."""
+    def write_file_stream(s,name,src_path,progress=None,stop_check=None):
+        """Ghi file theo luong KHONG ma hoa - TOI UU TOC DO TOI DA cho USB 2.0/3.0.
+        - Sector dau: header 'SRAW'+size.
+        - Ghi theo KHOI LON 16MB (1 WriteFile/khoi), seek 1 lan, buffer dung lai.
+        - stop_check(): tra True de dung giua chung.
+        Tra ve True neu xong, False neu bi dung."""
         s.files=[f for f in s.files if not(f.name==name and f.act)]
         start=s._next_free_sector()
         total=os.path.getsize(src_path)
         k32=ctypes.windll.kernel32
-        # 1) Header sector
-        hdr=b"SRAW"+struct.pack("<Q",total)
-        hdr=hdr+b'\0'*(SECTOR-len(hdr))
+        hdr=b"SRAW"+struct.pack("<Q",total);hdr=hdr+b'\0'*(SECTOR-len(hdr))
         disk_write(s.h,s._as(start),hdr)
-        # 2) Du lieu - khoi 4MB, seek 1 lan, buffer dung lai
-        BLOCK=4*1024*1024  # toi uu chung cho USB 2.0 (>=1MB) va 3.0
+        BLOCK=16*1024*1024  # khoi 16MB -> toc do sequential cao nhat
         addr=_aligned_buffer(BLOCK)
         data_abs=s._as(start+1);off=data_abs*SECTOR
         hi=ctypes.c_long(off>>32);k32.SetFilePointer(s.h,off&0xFFFFFFFF,ctypes.byref(hi),0)
-        done=0
+        done=0;stopped=False
         try:
             with open(src_path,"rb",buffering=0)as fi:
                 while True:
+                    if stop_check and stop_check():stopped=True;break
+                    # doc day BLOCK (readinto tranh cap phat lai)
                     chunk=fi.read(BLOCK)
                     if not chunk:break
-                    n=len(chunk)
-                    wlen=n
+                    n=len(chunk);wlen=n
                     if wlen%SECTOR:
                         chunk=chunk+b'\0'*(SECTOR-(wlen%SECTOR));wlen=len(chunk)
                     ctypes.memmove(addr,chunk,wlen)
@@ -303,13 +358,15 @@ class SectorFS:
                     done+=n
                     if progress:progress(min(done,total),total)
         finally:_free_buffer(addr)
+        if stopped:
+            s._write_tbl();return False  # khong luu entry -> coi nhu chua copy
         esz=SECTOR+total
         s.files.append(SectorEntry(name,start,total,esz,True))
         s._write_tbl()
         return True
 
-    def read_file_stream(s,name,dst_path,progress=None):
-        """Doc file theo luong - TOI UU: doc khoi 4MB, seek 1 lan, buffer dung lai."""
+    def read_file_stream(s,name,dst_path,progress=None,stop_check=None):
+        """Doc file theo luong - TOI UU: doc khoi 16MB, seek 1 lan, buffer dung lai."""
         ent=None
         for f in s.files:
             if f.name==name and f.act:ent=f;break
@@ -318,14 +375,15 @@ class SectorFS:
         if hdr[:4]!=b"SRAW":return False
         total=ent.sz
         k32=ctypes.windll.kernel32
-        BLOCK=4*1024*1024
+        BLOCK=16*1024*1024
         addr=_aligned_buffer(BLOCK)
         data_abs=s._as(ent.sec+1);off=data_abs*SECTOR
         hi=ctypes.c_long(off>>32);k32.SetFilePointer(s.h,off&0xFFFFFFFF,ctypes.byref(hi),0)
-        written=0
+        written=0;stopped=False
         try:
             with open(dst_path,"wb",buffering=0)as fo:
                 while written<total:
+                    if stop_check and stop_check():stopped=True;break
                     remain=total-written
                     want=min(BLOCK,((remain+SECTOR-1)//SECTOR)*SECTOR)  # can chinh sector
                     rd=wintypes.DWORD(0)
@@ -338,6 +396,10 @@ class SectorFS:
                     written+=take
                     if progress:progress(written,total)
         finally:_free_buffer(addr)
+        if stopped:
+            try:os.remove(dst_path)
+            except:pass
+            return False
         return written==total
 
     def is_stream_file(s,name):
@@ -868,9 +930,13 @@ class MW(QMainWindow):
 
         rt.addWidget(bd,stretch=1)
         s.pb=QProgressBar();s.pb.setVisible(False);s.pb.setTextVisible(True);rt.addWidget(s.pb)
-        s.copy_lbl=QLabel("");s.copy_lbl.setVisible(False)
-        s.copy_lbl.setStyleSheet("font-size:14px;font-weight:bold;color:#1565c0;padding:4px 10px;background:#eaf2fd;")
-        rt.addWidget(s.copy_lbl)
+        prow=QWidget();prl=QHBoxLayout(prow);prl.setContentsMargins(0,0,0,0);prl.setSpacing(6)
+        s.copy_lbl=QLabel("");s.copy_lbl.setStyleSheet("font-size:14px;font-weight:bold;color:#1565c0;padding:4px 10px;background:#eaf2fd;")
+        prl.addWidget(s.copy_lbl,stretch=1)
+        s.stop_btn=QPushButton("Dừng");s.stop_btn.setObjectName("bd")
+        s.stop_btn.setStyleSheet("QPushButton{background:#e53935;color:white;font-weight:bold;border:none;border-radius:4px;padding:6px 18px;}QPushButton:hover{background:#f44336;}")
+        s.stop_btn.clicked.connect(s._stop_copy);prl.addWidget(s.stop_btn)
+        s.prow=prow;prow.setVisible(False);rt.addWidget(prow)
         s.statusBar().showMessage("USB AN TOÀN - AES-256 | Dữ liệu ẩn, chặn copy trực tiếp")
 
     def _pc_locations(s):
@@ -1133,69 +1199,70 @@ class MW(QMainWindow):
         for it in s.tu.selectedItems():
             name=it.data(0,Qt.UserRole)
             if name:s._open(name);break
+    def _start_copy(s,jobs,direction):
+        if getattr(s,"_worker",None)and s._worker.isRunning():
+            QMessageBox.information(s,"","Đang copy, vui lòng đợi hoặc bấm Dừng.");return
+        s.pb.setVisible(True);s.pb.setValue(0);s.pb.setFormat("0%")
+        s.prow.setVisible(True);s.stop_btn.setEnabled(True)
+        s.copy_lbl.setText("Đang chuẩn bị...")
+        s._worker=CopyWorker(s.sfs,jobs,direction,s.cp)
+        s._worker.progress.connect(s._on_prog)
+        s._worker.error.connect(lambda m:s.statusBar().showMessage("Lỗi: "+m,4000))
+        s._worker.finished_all.connect(lambda ok,tot,st:s._on_copy_done(ok,tot,st,direction))
+        s._worker.start()
+
+    def _on_prog(s,done,total,speed,name):
+        pct=int(done/max(1.0,total)*100)
+        s.pb.setValue(pct);s.pb.setFormat(f"{pct}%")
+        s.copy_lbl.setText(f"{os.path.basename(name)}  |  {fs(done)} / {fs(total)}  ({pct}%)  |  {fs(speed)}/s")
+
+    def _on_copy_done(s,ok,tot,stopped,direction):
+        s.pb.setValue(100 if not stopped else s.pb.value())
+        s.stop_btn.setEnabled(False)
+        if direction=="to_usb":s.luc()
+        else:s.lpc(s.cp)
+        if stopped:
+            s.copy_lbl.setText(f"Đã DỪNG. Copy được {ok}/{tot} file.")
+        else:
+            s.pb.setFormat("Hoàn tất 100%")
+            s.copy_lbl.setText(f"Hoàn tất: {ok}/{tot} file.")
+        QTimer.singleShot(4000,lambda:(s.pb.setVisible(False),s.prow.setVisible(False)))
+
+    def _stop_copy(s):
+        if getattr(s,"_worker",None)and s._worker.isRunning():
+            s.stop_btn.setEnabled(False)
+            s.copy_lbl.setText("Đang dừng...")
+            s._worker.stop()
+
     def c2u(s):
         sl=s.tp.selectedItems()
         if not sl or not s.sfs:return
         prefix=(s.usb_path+"/")if s.usb_path else ""
-        items=[]
+        jobs=[]
         for it in sl:
             fp=it.data(0,Qt.UserRole)
             if not fp:continue
             if it.data(0,Qt.UserRole+1):
-                folder_base=os.path.dirname(fp)
+                folder_base=os.path.dirname(fp);has_file=False
                 for root,_,files in os.walk(fp):
                     for fn in files:
                         full=os.path.join(root,fn)
                         rel=os.path.relpath(full,folder_base).replace("\\","/")
-                        items.append((full,prefix+rel))
-                if not any(True for _,_,fs_ in os.walk(fp) for _ in fs_):
-                    items.append((None,prefix+os.path.basename(fp)+"/.keep"))
+                        try:sz=os.path.getsize(full)
+                        except:sz=0
+                        jobs.append({"src":full,"name":prefix+rel,"size":sz});has_file=True
+                if not has_file:
+                    jobs.append({"marker":True,"name":prefix+os.path.basename(fp)+"/.keep","size":0})
             else:
-                items.append((fp,prefix+os.path.basename(fp)))
-        if not items:QMessageBox.information(s,"","Không có gì để copy!");return
-        # Tong dung luong de tinh % chung
-        total_bytes=0
-        for full,_ in items:
-            if full:
-                try:total_bytes+=os.path.getsize(full)
-                except:pass
-        total_bytes=max(1,total_bytes)
-        s.pb.setVisible(True);s.pb.setValue(0)
-        s.copy_lbl.setVisible(True)
-        ok_count=0;done_total=[0]
-        import time as _t;t0=_t.time()
-        for i,(full,name) in enumerate(items):
-            try:
-                if full is None:
-                    s.sfs.write_file(name,b"")  # marker thu muc rong (raw)
-                else:
-                    sz=os.path.getsize(full)
-                    base_done=done_total[0]
-                    def prog(d,t,_i=i,_n=name,_sz=sz,_base=base_done):
-                        cur=_base+d
-                        pct=int(cur/total_bytes*100)
-                        s.pb.setValue(pct)
-                        el=max(0.001,_t.time()-t0);spd=cur/el
-                        s.pb.setFormat(f"[{_i+1}/{len(items)}] {os.path.basename(_n)} - {pct}%")
-                        s.copy_lbl.setText(
-                            f"Đang copy: {fs(cur)} / {fs(total_bytes)}  ({pct}%)   |   "
-                            f"Tốc độ: {fs(spd)}/s")
-                        QApplication.processEvents()
-                    # COPY RAW theo luong (khong ma hoa) - chay file 16GB+ nhanh
-                    s.sfs.write_file_stream(name,full,progress=prog)
-                    done_total[0]+=sz
-                ok_count+=1
-            except MemoryError:
-                QMessageBox.critical(s,"",f"File quá lớn, thiếu RAM: {name}")
-            except Exception as e:QMessageBox.critical(s,"",f"Lỗi {name}: {e}")
-        s.pb.setValue(100);s.pb.setFormat("Hoàn tất 100%")
-        s.copy_lbl.setText(f"Đã copy xong {fs(done_total[0])} ({ok_count}/{len(items)} file)")
-        QTimer.singleShot(4000,lambda:(s.pb.setVisible(False),s.copy_lbl.setVisible(False)))
-        s.luc();QMessageBox.information(s,"",f"Đã copy {ok_count}/{len(items)} file vào USB!")
+                try:sz=os.path.getsize(fp)
+                except:sz=0
+                jobs.append({"src":fp,"name":prefix+os.path.basename(fp),"size":sz})
+        if not jobs:QMessageBox.information(s,"","Không có gì để copy!");return
+        s._start_copy(jobs,"to_usb")
+
     def cfu(s):
         sl=s.tu.selectedItems()
         if not sl or not s.sfs:return
-        # Chon thu muc ao -> copy tat ca file trong do
         names=[]
         for it in sl:
             nm=it.data(0,Qt.UserRole);is_folder=it.data(0,Qt.UserRole+1)
@@ -1206,47 +1273,12 @@ class MW(QMainWindow):
                     if fn.startswith(fold_prefix)and not fn.endswith("/.keep"):names.append(fn)
             elif nm:names.append(nm)
         if not names:QMessageBox.information(s,"","Không có file!");return
-        total_bytes=0;name_sz={}
-        for f in s.sfs.files:
-            if f.name in names:name_sz[f.name]=f.sz;total_bytes+=f.sz
-        total_bytes=max(1,total_bytes)
-        s.pb.setVisible(True);s.pb.setValue(0);s.copy_lbl.setVisible(True)
-        ok_count=0;done_total=[0]
-        import time as _t;t0=_t.time()
-        for i,name in enumerate(names):
-            rel=name
-            out=os.path.join(s.cp,rel.replace("/",os.sep))
-            d=os.path.dirname(out)
-            if d:os.makedirs(d,exist_ok=True)
-            b,e=os.path.splitext(out);c=1
-            while os.path.exists(out):out=f"{b}({c}){e}";c+=1
-            base_done=done_total[0]
-            try:
-                if s.sfs.is_stream_file(name):
-                    def prog(dn,tt,_i=i,_n=name,_base=base_done):
-                        cur=_base+dn;pct=int(cur/total_bytes*100)
-                        s.pb.setValue(pct)
-                        el=max(0.001,_t.time()-t0);spd=cur/el
-                        s.pb.setFormat(f"[{_i+1}/{len(names)}] {os.path.basename(_n)} - {pct}%")
-                        s.copy_lbl.setText(f"Đang copy về máy: {fs(cur)} / {fs(total_bytes)}  ({pct}%)   |   Tốc độ: {fs(spd)}/s")
-                        QApplication.processEvents()
-                    okk=s.sfs.read_file_stream(name,out,progress=prog)
-                    if not okk:
-                        QMessageBox.critical(s,"","File lỗi hoặc không đọc được!");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
-                else:
-                    # File nho / marker cu
-                    data=s.sfs.read_file(name)
-                    with open(out,"wb")as f:f.write(data if data else b"")
-                done_total[0]+=name_sz.get(name,0)
-                s.pb.setValue(int(done_total[0]/total_bytes*100))
-                s.copy_lbl.setText(f"Đã copy về máy: {fs(done_total[0])} / {fs(total_bytes)}")
-                QApplication.processEvents();ok_count+=1
-            except Exception as ex:
-                QMessageBox.critical(s,"",f"Lỗi: {ex}");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
-        s.pb.setValue(100);s.pb.setFormat("Hoàn tất 100%")
-        s.copy_lbl.setText(f"Đã copy về máy {fs(done_total[0])} ({ok_count} file)")
-        QTimer.singleShot(4000,lambda:(s.pb.setVisible(False),s.copy_lbl.setVisible(False)))
-        s.lpc(s.cp);QMessageBox.information(s,"",f"Đã copy {ok_count} mục về máy!")
+        name_sz={f.name:f.sz for f in s.sfs.files}
+        jobs=[]
+        for name in names:
+            out=os.path.join(s.cp,name.replace("/",os.sep))
+            jobs.append({"name":name,"out":out,"size":name_sz.get(name,0)})
+        s._start_copy(jobs,"from_usb")
     def ud(s):
         sl=s.tu.selectedItems()
         if not sl or not s.sfs:return
@@ -1352,6 +1384,9 @@ class MW(QMainWindow):
         super().changeEvent(ev)
 
     def closeEvent(s,ev):
+        # Dung copy dang chay (neu co)
+        if getattr(s,"_worker",None)and s._worker.isRunning():
+            s._worker.stop();s._worker.wait(3000)
         if hasattr(s,'guard'):s.guard.stop()
         try:
             if s.sfs:s.sfs.write_config(s.cfg)
