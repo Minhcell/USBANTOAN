@@ -265,25 +265,20 @@ class SectorFS:
         if not s.files:return DATA_START
         return max(f.sec+((f.esz+SECTOR-1)//SECTOR)+4 for f in s.files if f.act)
 
-    def write_file_stream(s,name,src_path,pw,progress=None):
-        """Ma hoa & ghi file LON theo luong (streaming) - khong nap ca file vao RAM.
-        Dinh dang: [MAGIC 'SFST'][16 salt] roi lien tiep cac block [4-byte enc_len][enc].
-        Moi block: plaintext CHUNK_PLAIN byte, ma hoa AES-GCM voi nonce = 12-byte counter.
-        progress(done_bytes,total_bytes) duoc goi de cap nhat %."""
+    def write_file_stream(s,name,src_path,progress=None):
+        """Ghi file theo luong KHONG ma hoa (raw) - nhanh, chay file rat lon.
+        Dinh dang: [MAGIC 'SRAW'] roi toan bo byte goc cua file.
+        Du lieu van AN trong vung sector + chan copy truc tiep (giong H04)."""
         s.files=[f for f in s.files if not(f.name==name and f.act)]
         start=s._next_free_sector()
-        total_plain=os.path.getsize(src_path)
-        sa=os.urandom(16);key=dk(pw,sa);aes=AESGCM(key)
-        CHUNK_PLAIN=4*1024*1024  # 4MB moi block
-        # Buffer ghi theo boi so sector
-        buf=bytearray();buf+=b"SFST"+sa
-        cur_sec=start;esz=0;done=0;counter=0
+        total=os.path.getsize(src_path)
+        buf=bytearray();buf+=b"SRAW"
+        cur_sec=start;esz=0;done=0
+        CH=8*1024*1024  # doc 8MB moi lan
         def flush(final=False):
             nonlocal buf,cur_sec,esz
-            # Ghi cac sector day
             n=len(buf)//SECTOR
             if n>0:
-                # ghi theo cum <=128 sector
                 pos=0
                 while pos<n*SECTOR:
                     part=buf[pos:pos+SECTOR*128]
@@ -292,70 +287,50 @@ class SectorFS:
                     cur_sec+=secs;esz+=len(part);pos+=len(part)
                 del buf[:n*SECTOR]
             if final and len(buf)>0:
-                # sector cuoi con du -> pad va ghi
                 pad=bytes(buf)+b'\0'*(SECTOR-len(buf))
                 disk_write(s.h,s._as(cur_sec),pad)
                 cur_sec+=1;esz+=len(buf);buf=bytearray()
         with open(src_path,"rb")as fi:
             while True:
-                chunk=fi.read(CHUNK_PLAIN)
+                chunk=fi.read(CH)
                 if not chunk:break
-                nonce=counter.to_bytes(12,"big");counter+=1
-                enc=aes.encrypt(nonce,chunk,None)
-                buf+=struct.pack("<I",len(enc))+enc
-                done+=len(chunk)
-                if len(buf)>=SECTOR*256:flush(False)
-                if progress:progress(done,total_plain)
+                buf+=chunk;done+=len(chunk)
+                if len(buf)>=SECTOR*512:flush(False)
+                if progress:progress(done,total)
         flush(True)
-        # esz = so byte thuc da ghi (khong tinh padding sector cuoi)
-        s.files.append(SectorEntry(name,start,total_plain,esz,True))
+        s.files.append(SectorEntry(name,start,total,esz,True))
         s._write_tbl()
         return True
 
-    def read_file_stream(s,name,dst_path,pw,progress=None):
-        """Doc file LON theo luong, giai ma tung block, ghi ra dst_path."""
+    def read_file_stream(s,name,dst_path,progress=None):
+        """Doc file theo luong KHONG ma hoa (raw), ghi ra dst_path."""
         ent=None
         for f in s.files:
             if f.name==name and f.act:ent=f;break
         if not ent:return False
         total_sec=(ent.esz+SECTOR-1)//SECTOR
-        # Doc header truoc (MAGIC+salt = 20 byte) tu sector dau
         first=disk_read(s.h,s._as(ent.sec),1)
-        if first[:4]!=b"SFST":
-            # Khong phai file streaming -> fallback doc thuong
+        if first[:4]!=b"SRAW":
             return False
-        sa=first[4:20];key=dk(pw,sa);aes=AESGCM(key)
-        # Doc toan bo phan con lai theo luong qua 1 con tro sector
-        class SecReader:
-            def __init__(rs):rs.sec=ent.sec;rs.buf=first[20:];rs.read=SECTOR
-            def get(rs,n):
-                while len(rs.buf)<n and rs.read<ent.esz:
-                    cnt=min(128,total_sec-(rs.read//SECTOR))
-                    if cnt<=0:break
-                    d=disk_read(s.h,s._as(ent.sec+rs.read//SECTOR),cnt)
-                    rs.buf+=d;rs.read+=len(d)
-                out=rs.buf[:n];rs.buf=rs.buf[n:];return out
-        r=SecReader();counter=0;done=0
+        to_read=ent.sz  # so byte goc cua file
+        written=0;buf=first[4:];sec_idx=1
         with open(dst_path,"wb")as fo:
-            while True:
-                lb=r.get(4)
-                if len(lb)<4:break
-                ln=struct.unpack("<I",lb)[0]
-                if ln==0 or ln>16*1024*1024+64:break
-                enc=r.get(ln)
-                if len(enc)<ln:break
-                nonce=counter.to_bytes(12,"big");counter+=1
-                try:dec=aes.decrypt(nonce,enc,None)
-                except:return False
-                fo.write(dec);done+=len(dec)
-                if progress:progress(done,ent.sz)
-        return True
+            while written<to_read:
+                if not buf:
+                    if sec_idx>=total_sec:break
+                    cnt=min(128,total_sec-sec_idx)
+                    buf=disk_read(s.h,s._as(ent.sec+sec_idx),cnt);sec_idx+=cnt
+                    if not buf:break
+                take=min(len(buf),to_read-written)
+                fo.write(buf[:take]);written+=take;buf=buf[take:]
+                if progress:progress(written,to_read)
+        return written==to_read
 
     def is_stream_file(s,name):
         for f in s.files:
             if f.name==name and f.act:
                 try:
-                    first=disk_read(s.h,s._as(f.sec),1);return first[:4]==b"SFST"
+                    first=disk_read(s.h,s._as(f.sec),1);return first[:4]==b"SRAW"
                 except:return False
         return False
 
@@ -776,7 +751,10 @@ class MW(QMainWindow):
         else:
             s.p2off=cfg.get("data_offset",cfg.get("part2_offset",0))
         s.sfs=None;s.cp=str(Path.home());s._t=[]
-        s.setWindowTitle(APP);s.resize(1100,620);s.setMinimumSize(900,500);s.setStyleSheet(S)
+        s.setWindowTitle(APP)
+        # Bao dam co nut thu nho, phong to, dong
+        s.setWindowFlags(Qt.Window|Qt.WindowMinimizeButtonHint|Qt.WindowMaximizeButtonHint|Qt.WindowCloseButtonHint|Qt.WindowSystemMenuHint)
+        s.resize(1150,660);s.setMinimumSize(820,480);s.setStyleSheet(S)
         # Mo sector file system
         try:s.sfs=SectorFS(s.dn,s.p2off);s.sfs.open()
         except Exception as e:QMessageBox.critical(None,"",f"Loi mo disk {s.dn}: {e}")
@@ -785,7 +763,6 @@ class MW(QMainWindow):
         s.guard=USBGuard(s.pub)
         s.guard.alert.connect(lambda m:s.statusBar().showMessage(m,3000))
         s.guard.start()
-        if not cfg.get("enc_set"):QTimer.singleShot(200,s.sep)
 
     def sep(s):
         QMessageBox.information(s,"","Dat MK ma hoa!")
@@ -805,12 +782,14 @@ class MW(QMainWindow):
             b=QToolButton();b.setText(" "+text);b.setIcon(st.standardIcon(icon))
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon);b.setIconSize(QSize(22,22))
             b.clicked.connect(fn);return b
-        tl.addWidget(tbtn("Tạo thư mục",QStyle.SP_FileDialogNewFolder,s.mk_usb_folder))
+        tl.addWidget(tbtn("Tạo TM (PC)",QStyle.SP_FileDialogNewFolder,s.mk_pc_folder))
+        tl.addWidget(tbtn("Tạo TM (USB)",QStyle.SP_FileDialogNewFolder,s.mk_usb_folder))
         tl.addWidget(tbtn("Đổi tên",QStyle.SP_FileDialogDetailedView,s.rename_item))
         tl.addWidget(tbtn("Xóa dữ liệu",QStyle.SP_TrashIcon,s.ud))
         tl.addStretch()
-        tl.addWidget(tbtn("Đổi mật khẩu",QStyle.SP_DialogYesButton,s.pw_menu))
+        tl.addWidget(tbtn("Đổi mật khẩu",QStyle.SP_DialogYesButton,s.clp))
         tl.addWidget(tbtn("Format USB",QStyle.SP_BrowserReload,s.format_usb))
+        tl.addWidget(tbtn("Thoát",QStyle.SP_DialogCloseButton,s.close))
         hb=QToolButton();hb.setText("?");hb.setFixedSize(30,30);hb.clicked.connect(s.show_help);tl.addWidget(hb)
         rt.addWidget(tb)
         # ===== THAN: 2 KHUNG + MUI TEN GIUA =====
@@ -907,19 +886,14 @@ class MW(QMainWindow):
     def show_help(s):
         QMessageBox.information(s,"Hướng dẫn",
             "USB AN TOÀN\n\n"
-            "• Chọn file bên trái (MÁY TÍNH), bấm mũi tên → để mã hóa & copy sang USB\n"
-            "• Chọn file bên phải (USB), bấm mũi tên ← để giải mã & copy về máy\n"
+            "• Chọn file bên trái (MÁY TÍNH), bấm mũi tên → để copy sang USB\n"
+            "• Chọn file bên phải (USB), bấm mũi tên ← để copy về máy\n"
             "• Nhấn đúp file trên USB để mở xem\n"
-            "• Tạo thư mục / Đổi tên / Xóa dữ liệu ở thanh trên\n"
-            "• Đổi mật khẩu: đổi mật khẩu đăng nhập hoặc mã hóa\n"
-            "• Format USB: xóa toàn bộ dữ liệu (cần mật khẩu Admin)\n\n"
-            "Dữ liệu được ẩn hoàn toàn, không thể copy trực tiếp vào USB.")
-
-    def pw_menu(s):
-        m=QMenu(s)
-        m.addAction("Đổi mật khẩu đăng nhập",s.clp)
-        m.addAction("Đặt / Đổi mật khẩu mã hóa",s.cep)
-        m.exec_(QCursor.pos())
+            "• Tạo TM (PC) / Tạo TM (USB): tạo thư mục ở từng bên\n"
+            "• Đổi tên / Xóa dữ liệu / Đổi mật khẩu (đăng nhập) / Format USB\n"
+            "• Thoát: đóng ứng dụng\n\n"
+            "Dữ liệu được ẩn hoàn toàn trong vùng riêng, KHÔNG thể copy\n"
+            "trực tiếp vào USB (chỉ copy được qua ứng dụng này).")
 
     def _mt(s,fp):
         try:return datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%d/%m/%y %H:%M")
@@ -1028,16 +1002,24 @@ class MW(QMainWindow):
             s.usb_path="/".join(s.usb_path.split("/")[:-1])
             s.luc()
     def mk_usb_folder(s):
-        n,ok=QInputDialog.getText(s,"Tạo thư mục","Tên thư mục mới:")
+        n,ok=QInputDialog.getText(s,"Tạo thư mục (USB)","Tên thư mục mới:")
         if not ok or not n.strip():return
         n=n.strip().replace("/","_").replace("\\","_")
-        # Tao thu muc ao bang 1 file danh dau an (.keep)
         marker=(s.usb_path+"/"if s.usb_path else"")+n+"/.keep"
-        pw=s._gep()
-        if not pw:return
         try:
-            s.sfs.write_file(marker,aes_enc(b"",pw))
+            s.sfs.write_file(marker,b"")  # marker thu muc rong (raw)
             s.luc()
+        except Exception as e:QMessageBox.critical(s,"",f"Lỗi: {e}")
+
+    def mk_pc_folder(s):
+        if not hasattr(s,"cp")or not s.cp or not os.path.isdir(s.cp):
+            QMessageBox.information(s,"","Chọn thư mục bên MÁY TÍNH trước.");return
+        n,ok=QInputDialog.getText(s,"Tạo thư mục (PC)","Tên thư mục mới:")
+        if not ok or not n.strip():return
+        n=n.strip().replace("/","_").replace("\\","_")
+        try:
+            os.makedirs(os.path.join(s.cp,n),exist_ok=True)
+            s.lpc(s.cp)
         except Exception as e:QMessageBox.critical(s,"",f"Lỗi: {e}")
 
     def format_usb(s):
@@ -1111,29 +1093,25 @@ class MW(QMainWindow):
         if d.exec_()==QDialog.Accepted:s.ep=d.password;return d.password
         return None
     def _open(s,name):
-        pw=s._aep()
-        if not pw or not s.sfs:return
+        if not s.sfs:return
         tmp=tempfile.mkdtemp(prefix="usbat_")
         out=os.path.join(tmp,os.path.basename(name))
         try:
             if s.sfs.is_stream_file(name):
-                # File lon - giai ma theo luong ra file tam
                 s.copy_lbl.setVisible(True);s.pb.setVisible(True)
                 def prog(dn,tt):
                     pct=int(dn/max(1,tt)*100);s.pb.setValue(pct)
-                    s.copy_lbl.setText(f"Đang mở (giải mã): {fs(dn)} / {fs(tt)} ({pct}%)");QApplication.processEvents()
-                okk=s.sfs.read_file_stream(name,out,pw,progress=prog)
+                    s.copy_lbl.setText(f"Đang mở: {fs(dn)} / {fs(tt)} ({pct}%)");QApplication.processEvents()
+                okk=s.sfs.read_file_stream(name,out,progress=prog)
                 s.pb.setVisible(False);s.copy_lbl.setVisible(False)
-                if not okk:QMessageBox.critical(s,"","Sai mật khẩu hoặc file lỗi!");return
+                if not okk:QMessageBox.critical(s,"","File lỗi hoặc không đọc được!");return
             else:
                 data=s.sfs.read_file(name)
-                if not data:QMessageBox.critical(s,"","Không đọc được!");return
-                dec=aes_dec(data,pw);del data
-                with open(out,"wb")as f:f.write(dec)
+                with open(out,"wb")as f:f.write(data if data else b"")
             s._t.append(tmp)
             if sys.platform=="win32":os.startfile(out)
             else:subprocess.Popen(["xdg-open",out])
-        except:QMessageBox.critical(s,"","Sai mật khẩu!")
+        except Exception as ex:QMessageBox.critical(s,"",f"Lỗi mở file: {ex}")
     def of(s):
         for it in s.tu.selectedItems():
             name=it.data(0,Qt.UserRole)
@@ -1141,8 +1119,6 @@ class MW(QMainWindow):
     def c2u(s):
         sl=s.tp.selectedItems()
         if not sl or not s.sfs:return
-        pw=s._gep()
-        if not pw:return
         prefix=(s.usb_path+"/")if s.usb_path else ""
         items=[]
         for it in sl:
@@ -1174,7 +1150,7 @@ class MW(QMainWindow):
         for i,(full,name) in enumerate(items):
             try:
                 if full is None:
-                    s.sfs.write_file(name,aes_enc(b"",pw))
+                    s.sfs.write_file(name,b"")  # marker thu muc rong (raw)
                 else:
                     sz=os.path.getsize(full)
                     base_done=done_total[0]
@@ -1188,8 +1164,8 @@ class MW(QMainWindow):
                             f"Đang copy: {fs(cur)} / {fs(total_bytes)}  ({pct}%)   |   "
                             f"Tốc độ: {fs(spd)}/s")
                         QApplication.processEvents()
-                    # STREAMING - khong nap ca file vao RAM -> chay duoc file 16GB+
-                    s.sfs.write_file_stream(name,full,pw,progress=prog)
+                    # COPY RAW theo luong (khong ma hoa) - chay file 16GB+ nhanh
+                    s.sfs.write_file_stream(name,full,progress=prog)
                     done_total[0]+=sz
                 ok_count+=1
             except MemoryError:
@@ -1198,24 +1174,21 @@ class MW(QMainWindow):
         s.pb.setValue(100);s.pb.setFormat("Hoàn tất 100%")
         s.copy_lbl.setText(f"Đã copy xong {fs(done_total[0])} ({ok_count}/{len(items)} file)")
         QTimer.singleShot(4000,lambda:(s.pb.setVisible(False),s.copy_lbl.setVisible(False)))
-        s.luc();QMessageBox.information(s,"",f"Đã mã hóa {ok_count}/{len(items)} file vào USB!")
+        s.luc();QMessageBox.information(s,"",f"Đã copy {ok_count}/{len(items)} file vào USB!")
     def cfu(s):
         sl=s.tu.selectedItems()
         if not sl or not s.sfs:return
-        pw=s._aep()
-        if not pw:return
-        # Neu chon thu muc ao -> giai ma tat ca file trong do
+        # Chon thu muc ao -> copy tat ca file trong do
         names=[]
         for it in sl:
             nm=it.data(0,Qt.UserRole);is_folder=it.data(0,Qt.UserRole+1)
+            if nm=="..":continue
             if is_folder:
-                # Lay tat ca file trong thu muc ao nay
                 fold_prefix=((s.usb_path+"/")if s.usb_path else"")+nm+"/"
                 for fn,_ in s.sfs.list_files():
                     if fn.startswith(fold_prefix)and not fn.endswith("/.keep"):names.append(fn)
             elif nm:names.append(nm)
         if not names:QMessageBox.information(s,"","Không có file!");return
-        # Tong dung luong (theo sz goc luu trong entry) de tinh %
         total_bytes=0;name_sz={}
         for f in s.sfs.files:
             if f.name in names:name_sz[f.name]=f.sz;total_bytes+=f.sz
@@ -1233,34 +1206,30 @@ class MW(QMainWindow):
             base_done=done_total[0]
             try:
                 if s.sfs.is_stream_file(name):
-                    # File LON - giai ma theo luong
                     def prog(dn,tt,_i=i,_n=name,_base=base_done):
                         cur=_base+dn;pct=int(cur/total_bytes*100)
                         s.pb.setValue(pct)
                         el=max(0.001,_t.time()-t0);spd=cur/el
                         s.pb.setFormat(f"[{_i+1}/{len(names)}] {os.path.basename(_n)} - {pct}%")
-                        s.copy_lbl.setText(f"Đang giải mã: {fs(cur)} / {fs(total_bytes)}  ({pct}%)   |   Tốc độ: {fs(spd)}/s")
+                        s.copy_lbl.setText(f"Đang copy về máy: {fs(cur)} / {fs(total_bytes)}  ({pct}%)   |   Tốc độ: {fs(spd)}/s")
                         QApplication.processEvents()
-                    okk=s.sfs.read_file_stream(name,out,pw,progress=prog)
+                    okk=s.sfs.read_file_stream(name,out,progress=prog)
                     if not okk:
-                        QMessageBox.critical(s,"","Sai mật khẩu hoặc file lỗi!");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
+                        QMessageBox.critical(s,"","File lỗi hoặc không đọc được!");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
                 else:
-                    # File nho - doc thuong
+                    # File nho / marker cu
                     data=s.sfs.read_file(name)
-                    if not data:continue
-                    dec=aes_dec(data,pw);del data
-                    with open(out,"wb")as f:f.write(dec)
-                    del dec
+                    with open(out,"wb")as f:f.write(data if data else b"")
                 done_total[0]+=name_sz.get(name,0)
                 s.pb.setValue(int(done_total[0]/total_bytes*100))
-                s.copy_lbl.setText(f"Đã giải mã: {fs(done_total[0])} / {fs(total_bytes)}")
+                s.copy_lbl.setText(f"Đã copy về máy: {fs(done_total[0])} / {fs(total_bytes)}")
                 QApplication.processEvents();ok_count+=1
-            except Exception:
-                QMessageBox.critical(s,"","Sai mật khẩu!");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
+            except Exception as ex:
+                QMessageBox.critical(s,"",f"Lỗi: {ex}");s.pb.setVisible(False);s.copy_lbl.setVisible(False);return
         s.pb.setValue(100);s.pb.setFormat("Hoàn tất 100%")
-        s.copy_lbl.setText(f"Đã giải mã xong {fs(done_total[0])} ({ok_count} file)")
+        s.copy_lbl.setText(f"Đã copy về máy {fs(done_total[0])} ({ok_count} file)")
         QTimer.singleShot(4000,lambda:(s.pb.setVisible(False),s.copy_lbl.setVisible(False)))
-        s.lpc(s.cp);QMessageBox.information(s,"",f"Đã giải mã {ok_count} mục về máy!")
+        s.lpc(s.cp);QMessageBox.information(s,"",f"Đã copy {ok_count} mục về máy!")
     def ud(s):
         sl=s.tu.selectedItems()
         if not sl or not s.sfs:return
