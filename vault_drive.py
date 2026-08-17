@@ -82,6 +82,22 @@ def disk_write(h,sector,data):
         return wr.value
     finally:_free_buffer(addr)
 
+def get_disk_length_bytes(dn):
+    """Lay tong dung luong disk (bytes) qua IOCTL_DISK_GET_LENGTH_INFO."""
+    if sys.platform!="win32":return 0
+    try:
+        k32=ctypes.windll.kernel32
+        h=k32.CreateFileW(f"\\\\.\\PhysicalDrive{dn}",0x80000000,3,None,3,0,None)
+        if h==-1:return 0
+        try:
+            IOCTL_DISK_GET_LENGTH_INFO=0x0007405C
+            buf=ctypes.create_string_buffer(8);rd=wintypes.DWORD(0)
+            ok=k32.DeviceIoControl(h,IOCTL_DISK_GET_LENGTH_INFO,None,0,buf,8,ctypes.byref(rd),None)
+            if ok:return struct.unpack("<q",buf.raw[:8])[0]
+        finally:k32.CloseHandle(h)
+    except:pass
+    return 0
+
 def get_physical_drive_number(drive_letter):
     """Lay so PhysicalDrive that cua o dia (vd 'E:' -> 1) luc chay.
     Dung IOCTL_STORAGE_GET_DEVICE_NUMBER - CHINH XAC tren moi may."""
@@ -295,6 +311,19 @@ class SectorFS:
             last+=((total+SECTOR-1)//SECTOR)+4
         s._write_tbl()
     def get_used(s):return sum(f.esz for f in s.files if f.act)
+    def data_bytes(s):
+        # Kich thuoc vung du lieu an = phan con lai cua disk sau partition public
+        try:
+            n=get_disk_length_bytes(s.dn)
+            if n>0:return max(0,n-(s.off+DATA_START)*SECTOR)
+        except:pass
+        return 0
+    def get_free(s):
+        try:
+            db=s.data_bytes()
+            if db<=0:return 0
+            return max(0,db-s.get_used())
+        except:return 0
     def write_config(s,cfg):
         """Ghi config vao vung du lieu (sector CFG_SEC) - raw sector, khong bi read-only chan."""
         data=json.dumps(cfg).encode()
@@ -484,24 +513,31 @@ def run_admin():
     try:ctypes.windll.shell32.ShellExecuteW(None,"runas",sys.argv[0],"",None,1);return True
     except:return False
 
-S="""*{font-family:'Segoe UI';font-size:9px;}
-QMainWindow,QDialog{background:#e8eef4;color:#1a2a3a;}QLabel{color:#3a4a5a;}
-QWidget#tb{background:#d0dce8;border-bottom:1px solid #a0b0c0;}
-QWidget#pnl{background:#f0f4f8;border:1px solid #c0ccd8;border-radius:4px;}
-QPushButton{background:#dce4ee;border:1px solid #b0bcc8;border-radius:3px;padding:3px 8px;color:#2a3a4a;}
-QPushButton:hover{background:#c8d4e2;}
-QPushButton#bp{background:#d0d8e2;border:1px solid #a8b4c2;color:#2a3a4a;font-weight:bold;}
-QPushButton#bs{background:#d0d8e2;border:1px solid #a8b4c2;color:#2a3a4a;font-weight:bold;}
-QPushButton#bd{background:#d8d0d0;border:1px solid #c0b0b0;color:#2a3a4a;}
-QTreeWidget{background:white;border:1px solid #c0ccd8;border-radius:3px;outline:none;alternate-background-color:#f4f6f9;}
-QTreeWidget::item{padding:2px;}QTreeWidget::item:selected{background:#bbdefb;color:#0d47a1;}
-QHeaderView::section{background:#e0e8f0;color:#4a5a6a;border:none;border-bottom:1px solid #c0ccd8;padding:3px 4px;font-size:8px;}
-QComboBox{background:white;border:1px solid #c0ccd8;border-radius:3px;padding:2px 6px;}
-QProgressBar{background:#e0e8f0;border:1px solid #c0ccd8;border-radius:2px;height:14px;text-align:center;font-size:8px;}
+S="""*{font-family:'Segoe UI';font-size:13px;}
+QMainWindow,QDialog{background:#ffffff;color:#202020;}
+QLabel{color:#202020;font-size:13px;}
+QWidget#tb{background:#ffffff;border-bottom:1px solid #e0e0e0;}
+QWidget#pnl{background:#ffffff;border:none;}
+QToolButton,QPushButton#tbBtn{background:transparent;border:none;padding:6px 12px;color:#202020;font-size:13px;}
+QToolButton:hover,QPushButton#tbBtn:hover{background:#eaf1fb;border-radius:4px;}
+QPushButton{background:#f0f0f0;border:1px solid #c0c0c0;border-radius:4px;padding:5px 12px;color:#202020;font-size:13px;}
+QPushButton:hover{background:#e5eefb;border-color:#7aa7e0;}
+QPushButton#bp{background:#1565c0;border:none;color:white;font-weight:bold;}
+QPushButton#bp:hover{background:#1976d2;}
+QPushButton#arrow{background:transparent;border:none;}
+QTreeWidget{background:white;border:1px solid #d0d0d0;outline:none;font-size:13px;}
+QTreeWidget::item{padding:4px 2px;border-bottom:1px solid #f0f0f0;}
+QTreeWidget::item:selected{background:#cfe3ff;color:#202020;}
+QTreeWidget::item:hover{background:#eaf4ff;}
+QHeaderView::section{background:#ffffff;color:#404040;border:none;border-bottom:1px solid #d0d0d0;padding:6px 4px;font-size:13px;font-weight:bold;}
+QComboBox{background:white;border:1px solid #c0c0c0;border-radius:3px;padding:4px 8px;font-size:13px;}
+QComboBox QAbstractItemView{background:white;border:1px solid #c0c0c0;selection-background-color:#cfe3ff;}
+QProgressBar{background:#f0f0f0;border:1px solid #d0d0d0;border-radius:2px;height:16px;text-align:center;font-size:11px;}
 QProgressBar::chunk{background:#1565c0;}
-QLineEdit{background:white;border:1px solid #b0bcc8;border-radius:3px;padding:5px 8px;font-size:10px;}
-QLineEdit:focus{border-color:#1565c0;}QCheckBox{color:#5a6a7a;font-size:8px;}
-QStatusBar{background:#d0dce8;color:#4a5a6a;border-top:1px solid #b0c0d0;font-size:8px;}"""
+QLineEdit{background:white;border:1px solid #c0c0c0;border-radius:3px;padding:5px 8px;font-size:13px;color:#202020;}
+QLineEdit:focus{border-color:#1565c0;}
+QCheckBox{color:#505050;font-size:12px;}
+QStatusBar{background:#ffffff;color:#404040;border-top:1px solid #e0e0e0;font-size:12px;}"""
 
 class PwD(QDialog):
     def __init__(s,title,msg,cfg=None,mode="login",parent=None):
@@ -593,7 +629,7 @@ class MW(QMainWindow):
         else:
             s.p2off=cfg.get("data_offset",cfg.get("part2_offset",0))
         s.sfs=None;s.cp=str(Path.home());s._t=[]
-        s.setWindowTitle(f"{APP} {VER}");s.setFixedSize(580,440);s.setStyleSheet(S)
+        s.setWindowTitle(APP);s.resize(1100,620);s.setMinimumSize(900,500);s.setStyleSheet(S)
         # Mo sector file system
         try:s.sfs=SectorFS(s.dn,s.p2off);s.sfs.open()
         except Exception as e:QMessageBox.critical(None,"",f"Loi mo disk {s.dn}: {e}")
@@ -612,68 +648,151 @@ class MW(QMainWindow):
 
     def build(s):
         s.usb_path=""  # duong dan thu muc ao hien tai trong USB
+        s.setWindowTitle(APP)
+        st=s.style()
         cw=QWidget();s.setCentralWidget(cw);rt=QVBoxLayout(cw);rt.setContentsMargins(0,0,0,0);rt.setSpacing(0)
-        tb=QWidget();tb.setObjectName("tb");tb.setFixedHeight(26)
-        tl=QHBoxLayout(tb);tl.setContentsMargins(6,0,6,0);tl.setSpacing(3)
-        tl.addWidget(QLabel(f"{APP} (Sector)",styleSheet="font-size:10px;font-weight:bold;color:#0d47a1;"))
-        s.ls=QLabel("",styleSheet="font-size:8px;color:#4a6a8a;");tl.addWidget(s.ls);tl.addStretch()
-        for t,f in[("MK ma hoa",s.sep),("Doi MK ma hoa",s.cep),("Doi MK DN",s.clp)]:
-            b=QPushButton(t);b.setFixedHeight(18);b.clicked.connect(f);tl.addWidget(b)
-        bl=QPushButton("Thoat");bl.setFixedHeight(18);bl.clicked.connect(s.close);tl.addWidget(bl)
+        # ===== THANH CONG CU TREN (giong H04) =====
+        tb=QWidget();tb.setObjectName("tb");tb.setFixedHeight(52)
+        tl=QHBoxLayout(tb);tl.setContentsMargins(10,4,10,4);tl.setSpacing(4)
+        def tbtn(text,icon,fn):
+            b=QToolButton();b.setText(" "+text);b.setIcon(st.standardIcon(icon))
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon);b.setIconSize(QSize(22,22))
+            b.clicked.connect(fn);return b
+        tl.addWidget(tbtn("Tạo thư mục",QStyle.SP_FileDialogNewFolder,s.mk_usb_folder))
+        tl.addWidget(tbtn("Đổi tên",QStyle.SP_FileDialogDetailedView,s.rename_item))
+        tl.addWidget(tbtn("Xóa dữ liệu",QStyle.SP_TrashIcon,s.ud))
+        tl.addStretch()
+        tl.addWidget(tbtn("Đổi mật khẩu",QStyle.SP_DialogYesButton,s.pw_menu))
+        tl.addWidget(tbtn("Format USB",QStyle.SP_BrowserReload,s.format_usb))
+        hb=QToolButton();hb.setText("?");hb.setFixedSize(30,30);hb.clicked.connect(s.show_help);tl.addWidget(hb)
         rt.addWidget(tb)
-        bd=QWidget();bl_=QHBoxLayout(bd);bl_.setContentsMargins(3,3,3,3);bl_.setSpacing(0)
-        # PC
-        pc=QWidget();pc.setObjectName("pnl");pl=QVBoxLayout(pc);pl.setContentsMargins(3,3,3,3);pl.setSpacing(2)
-        h1=QHBoxLayout();h1.addWidget(QLabel("MAY TINH"))
-        s.cd=QComboBox();s.cd.setFixedHeight(18)
-        for d in gd():s.cd.addItem(d,d)
-        s.cd.currentIndexChanged.connect(lambda:s.lpc(s.cd.currentData()));h1.addWidget(s.cd)
-        bu=QPushButton(" Len ");bu.setFixedSize(40,20);bu.clicked.connect(s.pu);h1.addWidget(bu)
-        bnp=QPushButton("Thu muc");bnp.setFixedSize(52,20);bnp.clicked.connect(s.mk_pc_folder);h1.addWidget(bnp)
-        pl.addLayout(h1)
-        s.plb=QLabel("",styleSheet="font-size:8px;color:#5a7a9a;background:#e0e8f0;padding:1px 3px;");pl.addWidget(s.plb)
-        s.tp=QTreeWidget();s.tp.setHeaderLabels(["Ten","Size","Ngay"]);s.tp.setAlternatingRowColors(True)
+        # ===== THAN: 2 KHUNG + MUI TEN GIUA =====
+        bd=QWidget();bl_=QHBoxLayout(bd);bl_.setContentsMargins(8,6,8,6);bl_.setSpacing(4)
+
+        # ---- KHUNG TRAI: MAY TINH ----
+        pc=QWidget();pc.setObjectName("pnl");pl=QVBoxLayout(pc);pl.setContentsMargins(2,2,2,2);pl.setSpacing(4)
+        r1=QHBoxLayout();r1.setSpacing(6)
+        s.cd=QComboBox();s.cd.setFixedHeight(28);s.cd.setMinimumWidth(180)
+        for d in s._pc_locations():s.cd.addItem(d[0],d[1])
+        s.cd.currentIndexChanged.connect(lambda:s.lpc(s.cd.currentData()));r1.addWidget(s.cd)
+        r1.addStretch()
+        eye=QLabel();eye.setPixmap(st.standardIcon(QStyle.SP_DialogDiscardButton).pixmap(16,16));r1.addWidget(eye)
+        s.pc_space=QLabel("Dung lượng còn lại: --");s.pc_space.setStyleSheet("font-size:14px;color:#202020;");r1.addWidget(s.pc_space)
+        pl.addLayout(r1)
+        r2=QHBoxLayout();r2.setSpacing(4)
+        bu=QToolButton();bu.setIcon(st.standardIcon(QStyle.SP_FileDialogToParent));bu.setIconSize(QSize(20,20));bu.clicked.connect(s.pu);r2.addWidget(bu)
+        s.plb=QLineEdit();s.plb.setReadOnly(True);r2.addWidget(s.plb,stretch=2)
+        rf1=QToolButton();rf1.setIcon(st.standardIcon(QStyle.SP_BrowserReload));rf1.setIconSize(QSize(18,18));rf1.clicked.connect(lambda:s.lpc(s.cp));r2.addWidget(rf1)
+        s.pc_search=QLineEdit();s.pc_search.setPlaceholderText("Tìm kiếm");s.pc_search.textChanged.connect(lambda:s.lpc(s.cp));r2.addWidget(s.pc_search,stretch=1)
+        pl.addLayout(r2)
+        s.tp=QTreeWidget();s.tp.setHeaderLabels(["Tên","Định dạng","Kích cỡ","Ngày chỉnh sửa"])
         s.tp.setSelectionMode(QAbstractItemView.ExtendedSelection);s.tp.setRootIsDecorated(False)
-        s.tp.header().setSectionResizeMode(0,QHeaderView.Stretch);s.tp.setColumnWidth(1,50);s.tp.setColumnWidth(2,75)
-        s.tp.itemDoubleClicked.connect(s.pdbl);pl.addWidget(s.tp);bl_.addWidget(pc,stretch=1)
-        # Center - nut mau xam nhat, khong do mau
-        ct=QWidget();ct.setFixedWidth(64);cl=QVBoxLayout(ct);cl.setContentsMargins(1,0,1,0);cl.setSpacing(3)
-        GRAY="QPushButton{background:#dce4ee;border:1px solid #b0bcc8;color:#2a3a4a;font-weight:bold;border-radius:4px;}QPushButton:hover{background:#c8d4e2;}"
-        cl.addStretch(2);cl.addWidget(QLabel("Ma hoa\nCopy",alignment=Qt.AlignCenter,styleSheet="font-size:7px;color:#5a6a7a;"))
-        b1=QPushButton(">>>");b1.setFixedSize(58,32);b1.setStyleSheet(GRAY.replace("font-weight:bold;","font-size:15px;font-weight:bold;"))
-        b1.clicked.connect(s.c2u);cl.addWidget(b1,alignment=Qt.AlignCenter);cl.addSpacing(8)
-        b2=QPushButton("<<<");b2.setFixedSize(58,32);b2.setStyleSheet(GRAY.replace("font-weight:bold;","font-size:15px;font-weight:bold;"))
-        b2.clicked.connect(s.cfu);cl.addWidget(b2,alignment=Qt.AlignCenter)
-        cl.addWidget(QLabel("Giai ma\nCopy",alignment=Qt.AlignCenter,styleSheet="font-size:7px;color:#5a6a7a;"));cl.addSpacing(12)
-        b3=QPushButton("Mo file");b3.setFixedSize(58,26);b3.setStyleSheet(GRAY.replace("font-weight:bold;","font-size:9px;font-weight:bold;"))
-        b3.clicked.connect(s.of);cl.addWidget(b3,alignment=Qt.AlignCenter);cl.addSpacing(4)
-        b4=QPushButton("Xoa");b4.setFixedSize(58,22);b4.setStyleSheet(GRAY.replace("font-weight:bold;","font-size:9px;font-weight:bold;"))
-        b4.clicked.connect(s.ud);cl.addWidget(b4,alignment=Qt.AlignCenter);cl.addStretch(2);bl_.addWidget(ct)
-        # USB (sector) - co thu muc ao
-        ub=QWidget();ub.setObjectName("pnl");ul=QVBoxLayout(ub);ul.setContentsMargins(3,3,3,3);ul.setSpacing(2)
-        h2=QHBoxLayout();h2.addWidget(QLabel("USB AN TOAN"));h2.addStretch()
-        buu=QPushButton(" Len ");buu.setFixedSize(40,20);buu.clicked.connect(s.usb_up);h2.addWidget(buu)
-        bnu=QPushButton("Thu muc");bnu.setFixedSize(52,20);bnu.clicked.connect(s.mk_usb_folder);h2.addWidget(bnu)
-        ul.addLayout(h2)
-        s.ulb=QLabel("",styleSheet="font-size:8px;color:#5a7a9a;background:#e0e8f0;padding:1px 3px;");ul.addWidget(s.ulb)
-        s.tu=QTreeWidget();s.tu.setHeaderLabels(["Ten","Size"]);s.tu.setAlternatingRowColors(True)
+        s.tp.header().setSectionResizeMode(0,QHeaderView.Stretch)
+        s.tp.setColumnWidth(1,90);s.tp.setColumnWidth(2,90);s.tp.setColumnWidth(3,150)
+        s.tp.itemDoubleClicked.connect(s.pdbl);pl.addWidget(s.tp)
+        s.pc_stat=QLabel("0 thư mục, 0 file");s.pc_stat.setStyleSheet("font-size:13px;color:#404040;padding:2px;");pl.addWidget(s.pc_stat)
+        bl_.addWidget(pc,stretch=1)
+
+        # ---- GIUA: 2 MUI TEN XANH (ve tay mau xanh giong H04) ----
+        ct=QWidget();ct.setFixedWidth(70);cl=QVBoxLayout(ct);cl.setContentsMargins(2,0,2,0);cl.setSpacing(16)
+        cl.addStretch(1)
+        b1=QToolButton();b1.setObjectName("arrow");b1.setIcon(s._arrow_icon("right"));b1.setIconSize(QSize(52,44))
+        b1.setToolTip("Mã hóa & copy sang USB");b1.clicked.connect(s.c2u);cl.addWidget(b1,alignment=Qt.AlignCenter)
+        b2=QToolButton();b2.setObjectName("arrow");b2.setIcon(s._arrow_icon("left"));b2.setIconSize(QSize(52,44))
+        b2.setToolTip("Giải mã & copy về PC");b2.clicked.connect(s.cfu);cl.addWidget(b2,alignment=Qt.AlignCenter)
+        cl.addStretch(2);bl_.addWidget(ct)
+
+        # ---- KHUNG PHAI: USB AN TOAN ----
+        ub=QWidget();ub.setObjectName("pnl");ul=QVBoxLayout(ub);ul.setContentsMargins(2,2,2,2);ul.setSpacing(4)
+        r3=QHBoxLayout();r3.setSpacing(6)
+        s.ucd=QComboBox();s.ucd.setFixedHeight(28);s.ucd.setMinimumWidth(180);s.ucd.addItem("USB AN TOÀN")
+        r3.addWidget(s.ucd);r3.addStretch()
+        s.usb_space=QLabel("Dung lượng còn lại: --");s.usb_space.setStyleSheet("font-size:14px;color:#202020;");r3.addWidget(s.usb_space)
+        ul.addLayout(r3)
+        r4=QHBoxLayout();r4.setSpacing(4)
+        buu=QToolButton();buu.setIcon(st.standardIcon(QStyle.SP_FileDialogToParent));buu.setIconSize(QSize(20,20));buu.clicked.connect(s.usb_up);r4.addWidget(buu)
+        s.ulb=QLineEdit();s.ulb.setReadOnly(True);r4.addWidget(s.ulb,stretch=2)
+        rf2=QToolButton();rf2.setIcon(st.standardIcon(QStyle.SP_BrowserReload));rf2.setIconSize(QSize(18,18));rf2.clicked.connect(s.luc);r4.addWidget(rf2)
+        s.usb_search=QLineEdit();s.usb_search.setPlaceholderText("Tìm kiếm");s.usb_search.textChanged.connect(lambda:s.luc());r4.addWidget(s.usb_search,stretch=1)
+        ul.addLayout(r4)
+        s.tu=QTreeWidget();s.tu.setHeaderLabels(["Tên","Định dạng","Kích cỡ","Ngày chỉnh sửa"])
         s.tu.setSelectionMode(QAbstractItemView.ExtendedSelection);s.tu.setRootIsDecorated(False)
-        s.tu.header().setSectionResizeMode(0,QHeaderView.Stretch);s.tu.setColumnWidth(1,70)
-        s.tu.itemDoubleClicked.connect(s.udbl);ul.addWidget(s.tu);bl_.addWidget(ub,stretch=1)
+        s.tu.header().setSectionResizeMode(0,QHeaderView.Stretch)
+        s.tu.setColumnWidth(1,90);s.tu.setColumnWidth(2,90);s.tu.setColumnWidth(3,150)
+        s.tu.itemDoubleClicked.connect(s.udbl);ul.addWidget(s.tu)
+        s.usb_stat=QLabel("0 thư mục, 0 file");s.usb_stat.setStyleSheet("font-size:13px;color:#404040;padding:2px;");ul.addWidget(s.usb_stat)
+        bl_.addWidget(ub,stretch=1)
+
         rt.addWidget(bd,stretch=1)
         s.pb=QProgressBar();s.pb.setVisible(False);s.pb.setTextVisible(True);rt.addWidget(s.pb)
-        s.statusBar().showMessage("Cach B: Sector | Copy file+thu muc+file lon | Khong hien o dia")
+        s.statusBar().showMessage("USB AN TOÀN - AES-256 | Dữ liệu ẩn, chặn copy trực tiếp")
+
+    def _pc_locations(s):
+        # Danh sach vi tri ben PC: Desktop + cac o dia
+        locs=[]
+        home=str(Path.home())
+        dk=os.path.join(home,"Desktop")
+        if os.path.isdir(dk):locs.append(("Desktop",dk))
+        locs.append(("Documents",os.path.join(home,"Documents")))
+        locs.append(("Downloads",os.path.join(home,"Downloads")))
+        for d in gd():locs.append((d,d))
+        return locs
+
+    def _arrow_icon(s,direction):
+        """Ve mui ten mau xanh giong H04."""
+        pm=QPixmap(52,44);pm.fill(Qt.transparent)
+        p=QPainter(pm);p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor("#1f6fd6"));p.setPen(Qt.NoPen)
+        w,h=52,44
+        poly=QPolygon()
+        if direction=="right":
+            poly=QPolygon([QPoint(4,15),QPoint(30,15),QPoint(30,6),QPoint(48,22),
+                           QPoint(30,38),QPoint(30,29),QPoint(4,29)])
+        else:
+            poly=QPolygon([QPoint(48,15),QPoint(22,15),QPoint(22,6),QPoint(4,22),
+                           QPoint(22,38),QPoint(22,29),QPoint(48,29)])
+        p.drawPolygon(poly);p.end()
+        return QIcon(pm)
+
+    def show_help(s):
+        QMessageBox.information(s,"Hướng dẫn",
+            "USB AN TOÀN\n\n"
+            "• Chọn file bên trái (MÁY TÍNH), bấm mũi tên → để mã hóa & copy sang USB\n"
+            "• Chọn file bên phải (USB), bấm mũi tên ← để giải mã & copy về máy\n"
+            "• Nhấn đúp file trên USB để mở xem\n"
+            "• Tạo thư mục / Đổi tên / Xóa dữ liệu ở thanh trên\n"
+            "• Đổi mật khẩu: đổi mật khẩu đăng nhập hoặc mã hóa\n"
+            "• Format USB: xóa toàn bộ dữ liệu (cần mật khẩu Admin)\n\n"
+            "Dữ liệu được ẩn hoàn toàn, không thể copy trực tiếp vào USB.")
+
+    def pw_menu(s):
+        m=QMenu(s)
+        m.addAction("Đổi mật khẩu đăng nhập",s.clp)
+        m.addAction("Đặt / Đổi mật khẩu mã hóa",s.cep)
+        m.exec_(QCursor.pos())
 
     def _mt(s,fp):
         try:return datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%d/%m/%y %H:%M")
         except:return""
+    def _fmt_col(s,n,is_dir):
+        if is_dir:return ""
+        e=os.path.splitext(n)[1].lstrip(".").lower()
+        return e if e else "file"
     def lpc(s,p):
         s.tp.clear();s.cp=p;s.plb.setText(p)
+        q=s.pc_search.text().strip().lower()if hasattr(s,"pc_search")else""
+        st=s.style()
+        # Dong "..." de len thu muc cha
+        parent=os.path.dirname(p)
+        if parent and parent!=p:
+            up=QTreeWidgetItem(["...","","",""]);up.setData(0,Qt.UserRole,parent);up.setData(0,Qt.UserRole+1,True)
+            up.setData(0,Qt.UserRole+2,"up");up.setIcon(0,st.standardIcon(QStyle.SP_FileDialogToParent));s.tp.addTopLevelItem(up)
         try:es=os.listdir(p)
-        except:return
+        except:es=[]
         ds,fl=[],[]
         for n in es:
             if n.startswith("."):continue
+            if q and q not in n.lower():continue
             fp=os.path.join(p,n)
             try:
                 if os.path.isdir(fp):ds.append((n,fp))
@@ -681,37 +800,44 @@ class MW(QMainWindow):
             except:pass
         ds.sort(key=lambda x:x[0].lower());fl.sort(key=lambda x:x[0].lower())
         for n,fp in ds:
-            it=QTreeWidgetItem([n,""]);it.setData(0,Qt.UserRole,fp);it.setData(0,Qt.UserRole+1,True)
-            it.setIcon(0,s.style().standardIcon(QStyle.SP_DirIcon));s.tp.addTopLevelItem(it)
+            it=QTreeWidgetItem([n,"",""," "+s._mt(fp)]);it.setData(0,Qt.UserRole,fp);it.setData(0,Qt.UserRole+1,True)
+            it.setIcon(0,st.standardIcon(QStyle.SP_DirIcon));s.tp.addTopLevelItem(it)
         for n,fp in fl:
             try:sz=os.path.getsize(fp)
             except:sz=0
-            it=QTreeWidgetItem([n,fs(sz)]);it.setData(0,Qt.UserRole,fp);it.setData(0,Qt.UserRole+1,False)
-            it.setIcon(0,s.style().standardIcon(QStyle.SP_FileIcon));s.tp.addTopLevelItem(it)
+            it=QTreeWidgetItem([n,s._fmt_col(n,False),fs(sz)," "+s._mt(fp)])
+            it.setData(0,Qt.UserRole,fp);it.setData(0,Qt.UserRole+1,False)
+            it.setIcon(0,st.standardIcon(QStyle.SP_FileIcon));s.tp.addTopLevelItem(it)
+        s.pc_stat.setText(f"{len(ds)} thư mục, {len(fl)} file")
+        # Dung luong con lai cua o dia PC
+        try:
+            drv=os.path.splitdrive(p)[0]+os.sep if os.path.splitdrive(p)[0] else p
+            u=shutil.disk_usage(drv);s.pc_space.setText(f"Dung lượng còn lại: {fs(u.free)}")
+        except:pass
     def pdbl(s,it,c):
         fp=it.data(0,Qt.UserRole)
         if fp and it.data(0,Qt.UserRole+1):s.lpc(fp)
     def pu(s):
         p=os.path.dirname(s.cp)
         if p and p!=s.cp:s.lpc(p)
-    def mk_pc_folder(s):
-        n,ok=QInputDialog.getText(s,"Tao thu muc PC","Ten thu muc moi:")
-        if ok and n.strip():
-            try:os.makedirs(os.path.join(s.cp,n.strip()),exist_ok=True);s.lpc(s.cp)
-            except Exception as e:QMessageBox.critical(s,"",f"Loi: {e}")
     def luc(s):
         """Load danh sach USB theo thu muc ao hien tai (usb_path)."""
         s.tu.clear()
         if not s.sfs:return
+        st=s.style()
+        q=s.usb_search.text().strip().lower()if hasattr(s,"usb_search")else""
         s.sfs._read_tbl()
         prefix=s.usb_path
-        s.ulb.setText(f"USB:/{prefix}"if prefix else"USB:/ (goc)")
+        s.ulb.setText(("USB AN TOÀN:/"+prefix)if prefix else"USB AN TOÀN:/")
+        # Dong "..." de len thu muc cha
+        if prefix:
+            up=QTreeWidgetItem(["...","","",""]);up.setData(0,Qt.UserRole,"..");up.setData(0,Qt.UserRole+1,True)
+            up.setData(0,Qt.UserRole+2,"up");up.setIcon(0,st.standardIcon(QStyle.SP_FileDialogToParent));s.tu.addTopLevelItem(up)
         all_files=s.sfs.list_files()
         subfolders=set();files_here=[]
         for name,sz in all_files:
             if name.endswith("/.keep"):
-                # File danh dau thu muc - dung de hien thu muc, khong hien file
-                rel_marker=name[:-6]  # bo "/.keep"
+                rel_marker=name[:-6]
                 if prefix:
                     if rel_marker.startswith(prefix+"/"):
                         sub=rel_marker[len(prefix)+1:]
@@ -728,21 +854,31 @@ class MW(QMainWindow):
                 subfolders.add(rest.split("/")[0])
             else:
                 files_here.append((rest,name,sz))
-        # Hien thu muc con truoc
+        nf=0;nfl=0
         for fold in sorted(subfolders):
-            it=QTreeWidgetItem([fold,"<thu muc>"]);it.setData(0,Qt.UserRole,fold);it.setData(0,Qt.UserRole+1,True)
-            it.setIcon(0,s.style().standardIcon(QStyle.SP_DirIcon));s.tu.addTopLevelItem(it)
-        # Roi den file
+            if q and q not in fold.lower():continue
+            it=QTreeWidgetItem([fold,"",""," "]);it.setData(0,Qt.UserRole,fold);it.setData(0,Qt.UserRole+1,True)
+            it.setIcon(0,st.standardIcon(QStyle.SP_DirIcon));s.tu.addTopLevelItem(it);nf+=1
         for disp,fullname,sz in sorted(files_here):
-            it=QTreeWidgetItem([disp,fs(sz)]);it.setData(0,Qt.UserRole,fullname);it.setData(0,Qt.UserRole+1,False)
-            it.setIcon(0,s.style().standardIcon(QStyle.SP_FileIcon));s.tu.addTopLevelItem(it)
+            if q and q not in disp.lower():continue
+            it=QTreeWidgetItem([disp,s._fmt_col(disp,False),fs(sz)," "])
+            it.setData(0,Qt.UserRole,fullname);it.setData(0,Qt.UserRole+1,False)
+            it.setIcon(0,st.standardIcon(QStyle.SP_FileIcon));s.tu.addTopLevelItem(it);nfl+=1
+        s.usb_stat.setText(f"{nf} thư mục, {nfl} file")
+        # Dung luong con lai vung du lieu an
+        try:
+            free=s.sfs.get_free();s.usb_space.setText(f"Dung lượng còn lại: {fs(free)}")
+        except:
+            try:
+                used=s.sfs.get_used();total=s.sfs.data_bytes();s.usb_space.setText(f"Dung lượng còn lại: {fs(max(0,total-used))}")
+            except:pass
         s.us()
     def usb_up(s):
         if s.usb_path:
             s.usb_path="/".join(s.usb_path.split("/")[:-1])
             s.luc()
     def mk_usb_folder(s):
-        n,ok=QInputDialog.getText(s,"Tao thu muc USB","Ten thu muc moi:")
+        n,ok=QInputDialog.getText(s,"Tạo thư mục","Tên thư mục mới:")
         if not ok or not n.strip():return
         n=n.strip().replace("/","_").replace("\\","_")
         # Tao thu muc ao bang 1 file danh dau an (.keep)
@@ -752,10 +888,69 @@ class MW(QMainWindow):
         try:
             s.sfs.write_file(marker,aes_enc(b"",pw))
             s.luc()
-        except Exception as e:QMessageBox.critical(s,"",f"Loi: {e}")
+        except Exception as e:QMessageBox.critical(s,"",f"Lỗi: {e}")
+
+    def format_usb(s):
+        """Xoa toan bo du lieu USB - can mat khau Admin (giong H04)."""
+        pw,ok=QInputDialog.getText(s,"Format USB","Nhập mật khẩu Admin để xóa toàn bộ dữ liệu:",QLineEdit.Password)
+        if not ok:return
+        if pw!=ADMIN:
+            QMessageBox.critical(s,"","Sai mật khẩu Admin!");return
+        if QMessageBox.warning(s,"Xác nhận Format",
+            "XÓA TOÀN BỘ dữ liệu trên USB AN TOÀN?\nKhông thể khôi phục!",
+            QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:return
+        try:
+            s.sfs.rebuild([])   # xoa sach vung du lieu
+            s.usb_path=""
+            s.luc()
+            QMessageBox.information(s,"","Đã format USB AN TOÀN - dữ liệu đã xóa sạch.")
+        except Exception as e:
+            QMessageBox.critical(s,"",f"Lỗi format: {e}")
+
+    def rename_item(s):
+        """Doi ten file/thu muc dang chon ben USB (giong H04)."""
+        sel=s.tu.selectedItems()
+        if not sel:
+            QMessageBox.information(s,"","Chọn 1 file hoặc thư mục bên USB để đổi tên.");return
+        it=sel[0]
+        old=it.data(0,Qt.UserRole);is_folder=it.data(0,Qt.UserRole+1)
+        if old=="..":return
+        cur=old.split("/")[-1]if not is_folder else old
+        new,ok=QInputDialog.getText(s,"Đổi tên","Tên mới:",text=cur)
+        if not ok or not new.strip():return
+        new=new.strip().replace("/","_").replace("\\","_")
+        try:
+            s.sfs._read_tbl()
+            prefix=s.usb_path
+            if is_folder:
+                # Doi ten thu muc: doi prefix cua tat ca file ben trong
+                base=(prefix+"/"if prefix else"")+old
+                newbase=(prefix+"/"if prefix else"")+new
+                changed=[]
+                for f in list(s.sfs.files):
+                    if f.name==base+"/.keep" or f.name.startswith(base+"/"):
+                        rest=f.name[len(base):]
+                        changed.append((f.name,newbase+rest))
+                for oldn,newn in changed:
+                    # doc-ghi lai voi ten moi
+                    data=s.sfs.read_file(oldn)
+                    s.sfs.delete_file(oldn)
+                    s.sfs.write_file(newn,data)
+            else:
+                # Doi ten file: giu nguyen thu muc, doi phan cuoi
+                parent="/".join(old.split("/")[:-1])
+                newn=(parent+"/"if parent else"")+new
+                data=s.sfs.read_file(old)
+                s.sfs.delete_file(old)
+                s.sfs.write_file(newn,data)
+            s.luc()
+        except Exception as e:
+            QMessageBox.critical(s,"",f"Lỗi đổi tên: {e}")
     def udbl(s,it,c):
         name=it.data(0,Qt.UserRole)
         is_folder=it.data(0,Qt.UserRole+1)
+        if name=="..":
+            s.usb_up();return
         if is_folder:
             # Vao thu muc con
             s.usb_path=(s.usb_path+"/"if s.usb_path else"")+name
@@ -918,7 +1113,9 @@ class MW(QMainWindow):
         sa=os.urandom(16);s.cfg["salt"]=sa.hex();s.cfg["pw_hash"]=hp(pw,sa).hex();s.cfg["att"]=5;s.sfs.write_config(s.cfg)
         QMessageBox.information(s,"","Doi MK thanh cong!")
     def us(s):
-        if s.sfs:s.ls.setText(f"Du lieu: {fs(s.sfs.get_used())} | Sector truc tiep")
+        if s.sfs:
+            try:s.statusBar().showMessage(f"USB AN TOÀN - AES-256 | Đã dùng: {fs(s.sfs.get_used())} | Dữ liệu ẩn, chặn copy trực tiếp")
+            except:pass
     def closeEvent(s,ev):
         if hasattr(s,'guard'):s.guard.stop()
         try:

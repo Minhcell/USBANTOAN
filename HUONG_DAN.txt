@@ -1,62 +1,66 @@
 ================================================================
-  BUILD 1 FILE EXE TREN GITHUB (KHONG CAI GI, KHONG RANH CODE)
+  USB AN TOAN - Giao dien giong H04 (1 FILE EXE, build GitHub)
 ================================================================
 
-Ket qua: 1 file duy nhat USB_AN_TOAN_Setup.exe (~50MB)
+Ket qua: 1 file duy nhat USB_AN_TOAN_Setup.exe
+Giao dien: giong het H04 (thanh cong cu, 2 khung, mui ten xanh)
+Bao mat: AES-256, du lieu an, CHAN copy truc tiep (lap day 0 byte)
 
 ----------------------------------------------------------------
-BUOC 1: Tao tai khoan GitHub (neu chua co)
+BUOC 1: Tao repository tren GitHub (mien phi)
 ----------------------------------------------------------------
-Vao https://github.com > Sign up (mien phi)
+https://github.com > dang ky > New repository > dat ten > Create
 
 ----------------------------------------------------------------
-BUOC 2: Tao Repository
+BUOC 2: Upload code
 ----------------------------------------------------------------
-1. Bam dau + goc phai > New repository
-2. Dat ten bat ky (vd: usb-an-toan) > Create repository
+Giai nen file nay, keo 2 thu vao khung upload cua GitHub:
+  - vault_drive.py
+  - thu muc .github
+Bam "Commit changes"
+
+  * Neu khong keo duoc .github:
+    Add file > Create new file > go ten: .github/workflows/build.yml
+    Dan noi dung file build.yml vao > Commit
 
 ----------------------------------------------------------------
-BUOC 3: Upload code
+BUOC 3: Cho build (5-7 phut)
 ----------------------------------------------------------------
-1. Bam "uploading an existing file"
-2. GIAI NEN file nay, keo CA 2 thu: 
-   - file vault_drive.py
-   - thu muc .github (co the an, bat hien file an de thay)
-   vao khung upload
-3. Bam "Commit changes"
-
-   * Neu khong keo duoc thu muc .github:
-     - Bam "Add file" > "Create new file"
-     - Go ten file: .github/workflows/build.yml
-     - Dan noi dung file build.yml vao
-     - Commit
+Tab "Actions" > cho tich XANH
 
 ----------------------------------------------------------------
-BUOC 4: Cho build (5-7 phut)
+BUOC 4: Tai file EXE
 ----------------------------------------------------------------
-1. Vao tab "Actions"
-2. Cho den khi co dau tich XANH
+Bam lan build xong > keo xuong "Artifacts" > tai ve > giai nen
+=> 1 file USB_AN_TOAN_Setup.exe
 
 ----------------------------------------------------------------
-BUOC 5: Tai file EXE
-----------------------------------------------------------------
-1. Bam vao lan build xong (tich xanh)
-2. Keo xuong muc "Artifacts"
-3. Tai "USB_AN_TOAN_Setup_EXE" > giai nen
-4. Co 1 file: USB_AN_TOAN_Setup.exe
-
-----------------------------------------------------------------
-BUOC 6: Dung
+BUOC 5: Dung
 ----------------------------------------------------------------
 1. Chuot phai USB_AN_TOAN_Setup.exe > Run as administrator
-2. Chon USB > dat mat khau > KHOI TAO
+2. Chon USB > dat mat khau dang nhap > KHOI TAO
+   (Setup se: tao partition nho chua EXE, LAP DAY 0 byte de
+    chan copy truc tiep, dat vung du lieu an AES-256)
 3. Rut USB, cam lai > chay USB_AN_TOAN.exe tren USB
+4. Dang nhap > dat mat khau ma hoa > dung
 
 ----------------------------------------------------------------
-CHAY LAI (sau khi sua code):
+CACH DUNG (giong H04):
 ----------------------------------------------------------------
-Tab Actions > bam ten workflow ben trai > Run workflow
+- Chon file ben trai (MAY TINH) > bam mui ten XANH sang phai
+  => ma hoa & copy vao USB
+- Chon file ben phai (USB) > bam mui ten XANH sang trai
+  => giai ma & copy ve may
+- Nhan dup file tren USB de mo xem
+- Tao thu muc / Doi ten / Xoa du lieu: thanh cong cu tren
+- Doi mat khau / Format USB: thanh cong cu tren
+
+----------------------------------------------------------------
+CHAN COPY TRUC TIEP (giong H04):
+----------------------------------------------------------------
+Neu keo tha file truc tiep vao USB (khong qua app), Windows bao
+"There is not enough space" (0 byte trong) - dung nhu H04.
 
 ================================================================
-Mat khau Admin mac dinh: M@nh6868
+Mat khau Admin (Format/Doi MK ma hoa): M@nh6868
 ================================================================
