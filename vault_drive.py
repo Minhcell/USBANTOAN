@@ -47,9 +47,11 @@ def _free_buffer(addr):
 
 def disk_open(dn):
     k32=ctypes.windll.kernel32
-    # NO_BUFFERING + WRITE_THROUGH -> bo qua cache Windows, ghi/doc truc tiep
+    # NO_BUFFERING: bypass read-cache + can chinh sector.
+    # BO WRITE_THROUGH: cho phep controller USB gom ghi -> NHANH hon nhieu.
+    # Du lieu se duoc day xuong dia bang FlushFileBuffers khi dong.
     h=k32.CreateFileW(f"\\\\.\\PhysicalDrive{dn}",0xC0000000,3,None,3,
-                      FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH,None)
+                      FILE_FLAG_NO_BUFFERING,None)
     if h==-1:raise OSError(f"Khong mo duoc disk {dn}! Can Admin.")
     return h
 def disk_close(h):
@@ -266,65 +268,77 @@ class SectorFS:
         return max(f.sec+((f.esz+SECTOR-1)//SECTOR)+4 for f in s.files if f.act)
 
     def write_file_stream(s,name,src_path,progress=None):
-        """Ghi file theo luong KHONG ma hoa (raw) - nhanh, chay file rat lon.
-        Dinh dang: [MAGIC 'SRAW'] roi toan bo byte goc cua file.
-        Du lieu van AN trong vung sector + chan copy truc tiep (giong H04)."""
+        """Ghi file theo luong KHONG ma hoa - TOI UU TOC DO cho USB 2.0/3.0.
+        - Sector dau: header 'SRAW'+size (512B, can chinh).
+        - Du lieu ghi tu sector ke tiep theo KHOI 4MB (1 WriteFile/khoi),
+          seek 1 lan, dung lai 1 buffer can chinh -> nhanh gap nhieu lan
+          so voi ghi tung 64KB."""
         s.files=[f for f in s.files if not(f.name==name and f.act)]
         start=s._next_free_sector()
         total=os.path.getsize(src_path)
-        buf=bytearray();buf+=b"SRAW"
-        cur_sec=start;esz=0;done=0
-        CH=8*1024*1024  # doc 8MB moi lan
-        def flush(final=False):
-            nonlocal buf,cur_sec,esz
-            n=len(buf)//SECTOR
-            if n>0:
-                pos=0
-                while pos<n*SECTOR:
-                    part=buf[pos:pos+SECTOR*128]
-                    disk_write(s.h,s._as(cur_sec),bytes(part))
-                    secs=(len(part)+SECTOR-1)//SECTOR
-                    cur_sec+=secs;esz+=len(part);pos+=len(part)
-                del buf[:n*SECTOR]
-            if final and len(buf)>0:
-                pad=bytes(buf)+b'\0'*(SECTOR-len(buf))
-                disk_write(s.h,s._as(cur_sec),pad)
-                cur_sec+=1;esz+=len(buf);buf=bytearray()
-        with open(src_path,"rb")as fi:
-            while True:
-                chunk=fi.read(CH)
-                if not chunk:break
-                buf+=chunk;done+=len(chunk)
-                if len(buf)>=SECTOR*512:flush(False)
-                if progress:progress(done,total)
-        flush(True)
+        k32=ctypes.windll.kernel32
+        # 1) Header sector
+        hdr=b"SRAW"+struct.pack("<Q",total)
+        hdr=hdr+b'\0'*(SECTOR-len(hdr))
+        disk_write(s.h,s._as(start),hdr)
+        # 2) Du lieu - khoi 4MB, seek 1 lan, buffer dung lai
+        BLOCK=4*1024*1024  # toi uu chung cho USB 2.0 (>=1MB) va 3.0
+        addr=_aligned_buffer(BLOCK)
+        data_abs=s._as(start+1);off=data_abs*SECTOR
+        hi=ctypes.c_long(off>>32);k32.SetFilePointer(s.h,off&0xFFFFFFFF,ctypes.byref(hi),0)
+        done=0
+        try:
+            with open(src_path,"rb",buffering=0)as fi:
+                while True:
+                    chunk=fi.read(BLOCK)
+                    if not chunk:break
+                    n=len(chunk)
+                    wlen=n
+                    if wlen%SECTOR:
+                        chunk=chunk+b'\0'*(SECTOR-(wlen%SECTOR));wlen=len(chunk)
+                    ctypes.memmove(addr,chunk,wlen)
+                    wr=wintypes.DWORD(0)
+                    if not k32.WriteFile(s.h,ctypes.c_void_p(addr),wlen,ctypes.byref(wr),None):
+                        raise OSError(f"Write fail err {k32.GetLastError()}")
+                    done+=n
+                    if progress:progress(min(done,total),total)
+        finally:_free_buffer(addr)
+        esz=SECTOR+total
         s.files.append(SectorEntry(name,start,total,esz,True))
         s._write_tbl()
         return True
 
     def read_file_stream(s,name,dst_path,progress=None):
-        """Doc file theo luong KHONG ma hoa (raw), ghi ra dst_path."""
+        """Doc file theo luong - TOI UU: doc khoi 4MB, seek 1 lan, buffer dung lai."""
         ent=None
         for f in s.files:
             if f.name==name and f.act:ent=f;break
         if not ent:return False
-        total_sec=(ent.esz+SECTOR-1)//SECTOR
-        first=disk_read(s.h,s._as(ent.sec),1)
-        if first[:4]!=b"SRAW":
-            return False
-        to_read=ent.sz  # so byte goc cua file
-        written=0;buf=first[4:];sec_idx=1
-        with open(dst_path,"wb")as fo:
-            while written<to_read:
-                if not buf:
-                    if sec_idx>=total_sec:break
-                    cnt=min(128,total_sec-sec_idx)
-                    buf=disk_read(s.h,s._as(ent.sec+sec_idx),cnt);sec_idx+=cnt
-                    if not buf:break
-                take=min(len(buf),to_read-written)
-                fo.write(buf[:take]);written+=take;buf=buf[take:]
-                if progress:progress(written,to_read)
-        return written==to_read
+        hdr=disk_read(s.h,s._as(ent.sec),1)
+        if hdr[:4]!=b"SRAW":return False
+        total=ent.sz
+        k32=ctypes.windll.kernel32
+        BLOCK=4*1024*1024
+        addr=_aligned_buffer(BLOCK)
+        data_abs=s._as(ent.sec+1);off=data_abs*SECTOR
+        hi=ctypes.c_long(off>>32);k32.SetFilePointer(s.h,off&0xFFFFFFFF,ctypes.byref(hi),0)
+        written=0
+        try:
+            with open(dst_path,"wb",buffering=0)as fo:
+                while written<total:
+                    remain=total-written
+                    want=min(BLOCK,((remain+SECTOR-1)//SECTOR)*SECTOR)  # can chinh sector
+                    rd=wintypes.DWORD(0)
+                    if not k32.ReadFile(s.h,ctypes.c_void_p(addr),want,ctypes.byref(rd),None):
+                        raise OSError(f"Read fail err {k32.GetLastError()}")
+                    got=rd.value
+                    if got<=0:break
+                    take=min(got,remain)
+                    fo.write(ctypes.string_at(addr,take))
+                    written+=take
+                    if progress:progress(written,total)
+        finally:_free_buffer(addr)
+        return written==total
 
     def is_stream_file(s,name):
         for f in s.files:
@@ -754,7 +768,10 @@ class MW(QMainWindow):
         s.setWindowTitle(APP)
         # Bao dam co nut thu nho, phong to, dong
         s.setWindowFlags(Qt.Window|Qt.WindowMinimizeButtonHint|Qt.WindowMaximizeButtonHint|Qt.WindowCloseButtonHint|Qt.WindowSystemMenuHint)
-        s.resize(1150,660);s.setMinimumSize(820,480);s.setStyleSheet(S)
+        s._compacting=False
+        s.resize(1150,660)
+        # Minimum du nho de co the thu ve 16cm x 11cm
+        s.setMinimumSize(480,360);s.setStyleSheet(S)
         # Mo sector file system
         try:s.sfs=SectorFS(s.dn,s.p2off);s.sfs.open()
         except Exception as e:QMessageBox.critical(None,"",f"Loi mo disk {s.dn}: {e}")
@@ -1303,6 +1320,37 @@ class MW(QMainWindow):
         if s.sfs:
             try:s.statusBar().showMessage(f"USB AN TOÀN - AES-256 | Đã dùng: {fs(s.sfs.get_used())} | Dữ liệu ẩn, chặn copy trực tiếp")
             except:pass
+
+    def _cm_to_px(s,cm):
+        """Doi cm sang pixel theo DPI thuc cua man hinh."""
+        try:
+            scr=QApplication.primaryScreen()
+            dpi=scr.physicalDotsPerInch()if scr else 96.0
+            if dpi<50 or dpi>400:dpi=96.0  # tranh gia tri bat thuong
+        except:dpi=96.0
+        return int(round(cm/2.54*dpi))
+
+    def _to_compact(s):
+        """Thu nho ve kich thuoc 16cm (dai) x 11cm (cao)."""
+        s._compacting=True
+        s.setWindowState(s.windowState()&~Qt.WindowMinimized&~Qt.WindowMaximized)
+        s.showNormal()
+        w=s._cm_to_px(16);h=s._cm_to_px(11)
+        s.resize(w,h)
+        # dua ve giua man hinh cho de thay
+        try:
+            scr=QApplication.primaryScreen().availableGeometry()
+            s.move(scr.center().x()-w//2,scr.center().y()-h//2)
+        except:pass
+        s._compacting=False
+
+    def changeEvent(s,ev):
+        # Khi bam nut THU NHO -> khong an xuong taskbar, ma thu ve 16x11cm
+        if ev.type()==QEvent.WindowStateChange and not s._compacting:
+            if s.windowState()&Qt.WindowMinimized:
+                QTimer.singleShot(0,s._to_compact)
+        super().changeEvent(ev)
+
     def closeEvent(s,ev):
         if hasattr(s,'guard'):s.guard.stop()
         try:
