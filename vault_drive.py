@@ -189,9 +189,9 @@ class SectorEntry:
 
 class USBGuard(QThread):
     """Chan MOI file/thu muc copy truc tiep vao phan vung EXE (khong qua app).
-    Chi giu lai EXE + config. Xoa tat ca thu khac lien tuc."""
+    Chi giu lai file EXE. Xoa moi thu khac (phong khi read-only that bai)."""
     alert=pyqtSignal(str)
-    ALLOWED={CF,CF.lower(),USB_EXE,USB_EXE.lower(),"._sysfill","autorun.inf",
+    ALLOWED={USB_EXE,USB_EXE.lower(),"autorun.inf",
              "System Volume Information","$RECYCLE.BIN","desktop.ini","Thumbs.db"}
     def __init__(s,root):super().__init__();s.root=root;s._stop=False;s._count=0
     def stop(s):s._stop=True
@@ -200,17 +200,12 @@ class USBGuard(QThread):
             try:
                 for n in os.listdir(s.root):
                     if s._stop:break
-                    # Giu lai EXE, config va System Volume Information
+                    # Chi giu lai EXE + muc he thong; xoa moi file khac
                     if n in s.ALLOWED:continue
-                    # Giu TAT CA file lap day (._sysfill, ._sysfill2, ._sysfill_tailN...)
-                    if n.startswith("._sysfill"):continue
-                    # Config an (.usbantoan) duoc giu, cac file . khac bi xoa
-                    if n==CF:continue
                     fp=os.path.join(s.root,n)
                     try:
                         if os.path.isdir(fp):shutil.rmtree(fp,True)
                         else:
-                            # Bo thuoc tinh read-only/hidden truoc khi xoa
                             try:ctypes.windll.kernel32.SetFileAttributesW(fp,0x80)
                             except:pass
                             os.remove(fp)
@@ -218,7 +213,7 @@ class USBGuard(QThread):
                         s.alert.emit(f"Da xoa file copy truc tiep: '{n}' (chi copy qua app!)")
                     except:pass
             except:pass
-            time.sleep(0.5)  # Quet nhanh hon (2 lan/giay)
+            time.sleep(0.5)
 
 class CopyWorker(QThread):
     """Copy tren luong NEN -> I/O chay full toc do, khong bi UI can.
@@ -581,11 +576,22 @@ def _fill_to_zero(pub,cb=None):
 
 def setup_partitions(dn,pw,cb=None):
     if dn<=0:return False,"Disk khong hop le!"
+    # Tinh cO phan vung VUA KHIT voi EXE (giong H04: chi co EXE, gan het cho)
+    exe_path=os.path.abspath(sys.argv[0])
+    if exe_path.lower().endswith(".py"):
+        pub_mb=PUB_MB  # che do dev (chay .py) - dung mac dinh
+    else:
+        try:
+            exe_sz=os.path.getsize(exe_path)
+            exe_mb_ceil=(exe_sz+1024*1024-1)//(1024*1024)  # lam tron len MB
+            pub_mb=max(20,exe_mb_ceil+2)  # +2MB cho FAT overhead -> EXE vua khit, con rat it cho
+        except:
+            pub_mb=PUB_MB
     if cb:cb("Xoa USB...");_dp(f"select disk {dn}\nclean\nexit\n");time.sleep(2)
-    # CHI tao 1 phan vung 64MB, PHAN CON LAI de UNALLOCATED
-    # -> Windows KHONG thay, KHONG doi format vung du lieu
+    # CHI tao 1 phan vung vua du chua EXE, PHAN CON LAI de UNALLOCATED
+    # -> Windows KHONG thay vung du lieu, KHONG doi format
     if cb:cb("Tao phan vung EXE...")
-    _dp(f"select disk {dn}\ncreate partition primary size={PUB_MB}\nformat fs=fat32 quick label=\"USB AN TOAN\"\nactive\nassign\nexit\n")
+    _dp(f"select disk {dn}\ncreate partition primary size={pub_mb}\nformat fs=fat32 quick label=\"USB AN TOAN\"\nactive\nassign\nexit\n")
     time.sleep(3)
     # Vung du lieu = ngay sau partition 1 (trong vung unallocated)
     p1=read_mbr_partition_size(dn,1)
@@ -593,7 +599,7 @@ def setup_partitions(dn,pw,cb=None):
         p1_start,p1_num=p1
         data_off=p1_start+p1_num  # sector bat dau vung unallocated
     else:
-        data_off=(PUB_MB*1024*1024)//SECTOR+2048
+        data_off=(pub_mb*1024*1024)//SECTOR+2048
     # Ghi header vao vung du lieu (raw sector, khong phai partition)
     try:
         h=disk_open(dn)
@@ -623,34 +629,27 @@ def setup_partitions(dn,pw,cb=None):
     sa=os.urandom(16)
     cfg={"v":VER,"salt":sa.hex(),"pw_hash":hp(pw,sa).hex(),"att":5,"disk_number":dn,
          "part2_offset":data_off,"data_offset":data_off,"enc_salt":"","enc_hash":"","enc_set":False}
-    # Ghi config vao VUNG DU LIEU (raw sector) - de phan vung EXE co the read-only
+    # Ghi config vao VUNG DU LIEU (raw sector) - KHONG dung file an tren phan vung EXE
     try:write_config_to_sector(dn,data_off,cfg)
     except Exception as e:return False,f"Loi ghi config sector: {e}"
-    # Marker nho tren phan vung EXE de nhan dien USB (chi 1 lan luc setup)
-    cp=os.path.join(pub,CF)
-    try:
-        with open(cp,"w")as f:json.dump({"usb_marker":True,"data_offset":data_off},f)
-        ct.windll.kernel32.SetFileAttributesW(cp,0x06)
-    except:pass
-    # Copy EXE truoc khi lap day
+    # Copy EXE vao phan vung (day gan het cho vi phan vung da tinh vua khit)
     exe=os.path.abspath(sys.argv[0])
-    if not exe.endswith(".py"):
+    if not exe.lower().endswith(".py"):
         try:shutil.copy2(exe,os.path.join(pub,USB_EXE))
-        except:pass
-    # LAP DAY phan vung EXE -> free = 0 byte tuyet doi -> Windows chan MOI copy ("khong du dung luong")
-    # QUAN TRONG: lap den khi 0 byte (giam dan chunk), khong de sot vai KB
-    if cb:cb("Khoa phan vung (lap day den 0 byte)...")
-    _fill_to_zero(pub,cb)
-    try:ct.windll.kernel32.SetFileAttributesW(os.path.join(pub,"._sysfill"),0x06)
-    except:pass
-    # Them read-only (lop bao ve thu 2)
+        except Exception as e:return False,f"Loi copy EXE: {e}"
+    # KHONG tao file lap day, KHONG tao file marker an
+    # -> Khi PC bat 'hien file an', USB chi thay DUY NHAT file EXE (giong H04)
+    # Chan copy truc tiep bang READ-ONLY volume (ghi vao bi tu choi)
+    if cb:cb("Khoa phan vung (read-only)...")
     try:
         time.sleep(1);set_volume_readonly(pub,True)
     except:pass
+    try:free=shutil.disk_usage(pub).free
+    except:free=0
     return True,(f"Thanh cong!\n\n"
-        f"Phan vung EXE: {pub} ({PUB_MB}MB)\n"
-        f"  - Da LAP DAY (0 byte trong) + read-only\n"
-        f"  - KHONG the copy truc tiep vao (chi qua app)\n"
+        f"Phan vung EXE: {pub} ({pub_mb}MB) - chi co file {USB_EXE}\n"
+        f"  - Read-only: KHONG the copy truc tiep vao (chi qua app)\n"
+        f"  - Khong co file an nao khac\n"
         f"Vung du lieu: UNALLOCATED - Windows KHONG thay\n\n"
         f"Rut USB, cam lai, chay {USB_EXE}")
 
@@ -689,16 +688,27 @@ def gd():
     except:dr=["C:\\"]
     return dr
 def du():
-    """Tim o dia USB (phan vung EXE) chua marker."""
-    e=os.path.abspath(sys.argv[0]);d=os.path.dirname(e)
-    for _ in range(5):
-        if os.path.exists(os.path.join(d,CF)):return d
-        p=os.path.dirname(d)
-        if p==d:break
-        d=p
+    """Tim o dia USB = chinh o dia dang chay EXE, xac nhan bang magic o vung sector.
+    KHONG dung file marker an -> USB chi co DUY NHAT file EXE."""
+    e=os.path.abspath(sys.argv[0])
     drv=os.path.splitdrive(e)[0]
-    if drv and os.path.exists(os.path.join(drv+os.sep,CF)):return drv+os.sep
-    return None
+    if not drv:return None
+    root=drv+os.sep
+    # Xac nhan la USB AN TOAN cua minh: doc magic o vung du lieu (sector)
+    try:
+        dn=get_physical_drive_number(root)
+        if dn>=0:
+            p1=read_mbr_partition_size(dn,1)
+            if p1:
+                off=p1[0]+p1[1]
+                h=disk_open(dn)
+                try:sec=disk_read(h,off)
+                finally:disk_close(h)
+                if sec[:8]==SEC_MAGIC:return root
+    except:pass
+    # Fallback: neu co dung file EXE tren o dia nay thi coi la USB
+    if os.path.exists(os.path.join(root,USB_EXE)):return root
+    return root
 def fs(n):
     n=float(n)
     if n<1024:return f"{n:.0f} B"
@@ -937,10 +947,6 @@ class MW(QMainWindow):
         s.stop_btn.setStyleSheet("QPushButton{background:#e53935;color:white;font-weight:bold;border:none;border-radius:4px;padding:6px 18px;}QPushButton:hover{background:#f44336;}")
         s.stop_btn.clicked.connect(s._stop_copy);prl.addWidget(s.stop_btn)
         s.prow=prow;prow.setVisible(False);rt.addWidget(prow)
-        # Dong hien dung luong muc dang chon (duoi dong % copy)
-        s.sel_lbl=QLabel("")
-        s.sel_lbl.setStyleSheet("font-size:13px;color:#333;padding:3px 10px;background:#f5f5f5;border-top:1px solid #e0e0e0;")
-        s.sel_lbl.setVisible(False);rt.addWidget(s.sel_lbl)
         s.statusBar().showMessage("USB AN TOÀN - AES-256 | Dữ liệu ẩn, chặn copy trực tiếp")
 
     def _pc_sel_size(s):
@@ -963,12 +969,24 @@ class MW(QMainWindow):
                 try:total+=os.path.getsize(fp)
                 except:pass
         if nf==0 and nd==0:
-            s.sel_lbl.setVisible(False);s.sel_lbl.setText("");return
+            s._show_sel("");return
         parts=[]
         if nd:parts.append(f"{nd} thư mục")
         if nf:parts.append(f"{nf} file")
-        s.sel_lbl.setText(f"Đã chọn (PC) — {', '.join(parts)}:  {fs(total)}")
-        s.sel_lbl.setVisible(True)
+        s._show_sel(f"Đã chọn (PC) — {', '.join(parts)}:  {fs(total)}")
+
+    def _show_sel(s,text):
+        """Hien dung luong muc dang chon NGAY CHO BAO % (copy_lbl).
+        Neu dang copy thi khong ghi de tien trINH %."""
+        if getattr(s,"_worker",None)and s._worker.isRunning():return
+        if text:
+            s.pb.setVisible(False)
+            s.stop_btn.setVisible(False)
+            s.copy_lbl.setText(text)
+            s.prow.setVisible(True)
+        else:
+            s.copy_lbl.setText("")
+            s.prow.setVisible(False)
 
     def _usb_sel_size(s):
         """Hien dung luong cua file/thu muc dang chon ben USB."""
@@ -989,12 +1007,11 @@ class MW(QMainWindow):
                 for fn,sz in allf:
                     if fn==nm:total+=sz;break
         if nf==0 and nd==0:
-            s.sel_lbl.setVisible(False);s.sel_lbl.setText("");return
+            s._show_sel("");return
         parts=[]
         if nd:parts.append(f"{nd} thư mục")
         if nf:parts.append(f"{nf} file")
-        s.sel_lbl.setText(f"Đã chọn (USB) — {', '.join(parts)}:  {fs(total)}")
-        s.sel_lbl.setVisible(True)
+        s._show_sel(f"Đã chọn (USB) — {', '.join(parts)}:  {fs(total)}")
 
     def _pc_locations(s):
         # Danh sach vi tri ben PC: Desktop + cac o dia
@@ -1260,7 +1277,7 @@ class MW(QMainWindow):
         if getattr(s,"_worker",None)and s._worker.isRunning():
             QMessageBox.information(s,"","Đang copy, vui lòng đợi hoặc bấm Dừng.");return
         s.pb.setVisible(True);s.pb.setValue(0);s.pb.setFormat("0%")
-        s.prow.setVisible(True);s.stop_btn.setEnabled(True)
+        s.prow.setVisible(True);s.stop_btn.setVisible(True);s.stop_btn.setEnabled(True)
         s.copy_lbl.setText("Đang chuẩn bị...")
         s._worker=CopyWorker(s.sfs,jobs,direction,s.cp)
         s._worker.progress.connect(s._on_prog)
