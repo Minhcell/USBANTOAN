@@ -830,12 +830,10 @@ class MW(QMainWindow):
             s.p2off=cfg.get("data_offset",cfg.get("part2_offset",0))
         s.sfs=None;s.cp=str(Path.home());s._t=[]
         s.setWindowTitle(APP)
-        # Bao dam co nut thu nho, phong to, dong
+        # Nut goc phai: thu nho (xuong taskbar), phong to/thu ve thuong (o vuong), dong
         s.setWindowFlags(Qt.Window|Qt.WindowMinimizeButtonHint|Qt.WindowMaximizeButtonHint|Qt.WindowCloseButtonHint|Qt.WindowSystemMenuHint)
-        s._compacting=False
         s.resize(1150,660)
-        # Minimum du nho de co the thu ve 16cm x 11cm
-        s.setMinimumSize(480,360);s.setStyleSheet(S)
+        s.setMinimumSize(820,500);s.setStyleSheet(S)
         # Mo sector file system
         try:s.sfs=SectorFS(s.dn,s.p2off);s.sfs.open()
         except Exception as e:QMessageBox.critical(None,"",f"Loi mo disk {s.dn}: {e}")
@@ -1411,36 +1409,6 @@ class MW(QMainWindow):
         if s.sfs:
             try:s.statusBar().showMessage(f"USB AN TOÀN - AES-256 | Đã dùng: {fs(s.sfs.get_used())} | Dữ liệu ẩn, chặn copy trực tiếp")
             except:pass
-
-    def _cm_to_px(s,cm):
-        """Doi cm sang pixel theo DPI thuc cua man hinh."""
-        try:
-            scr=QApplication.primaryScreen()
-            dpi=scr.physicalDotsPerInch()if scr else 96.0
-            if dpi<50 or dpi>400:dpi=96.0  # tranh gia tri bat thuong
-        except:dpi=96.0
-        return int(round(cm/2.54*dpi))
-
-    def _to_compact(s):
-        """Thu nho ve kich thuoc 16cm (dai) x 11cm (cao)."""
-        s._compacting=True
-        s.setWindowState(s.windowState()&~Qt.WindowMinimized&~Qt.WindowMaximized)
-        s.showNormal()
-        w=s._cm_to_px(16);h=s._cm_to_px(11)
-        s.resize(w,h)
-        # dua ve giua man hinh cho de thay
-        try:
-            scr=QApplication.primaryScreen().availableGeometry()
-            s.move(scr.center().x()-w//2,scr.center().y()-h//2)
-        except:pass
-        s._compacting=False
-
-    def changeEvent(s,ev):
-        # Khi bam nut THU NHO -> khong an xuong taskbar, ma thu ve 16x11cm
-        if ev.type()==QEvent.WindowStateChange and not s._compacting:
-            if s.windowState()&Qt.WindowMinimized:
-                QTimer.singleShot(0,s._to_compact)
-        super().changeEvent(ev)
 
     def closeEvent(s,ev):
         # Dung copy dang chay (neu co)
