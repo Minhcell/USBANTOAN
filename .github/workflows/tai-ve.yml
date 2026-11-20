@@ -8,6 +8,7 @@ on:
     workflows:
       - "Build USB AN TOAN (1 file EXE)"
     types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,13 +20,27 @@ concurrency:
 
 jobs:
   publish:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Chọn bản build
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ID="${{ github.event.workflow_run.id }}"; SHA="${{ github.event.workflow_run.head_sha }}"
+          if [ -z "$ID" ]; then
+            # Bấm tay: lấy bản build thành công gần nhất
+            for w in build.yml; do
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?status=success&per_page=1" --jq '.workflow_runs[0]|"\(.id) \(.head_sha) \(.updated_at)"' || true
+            done | sort -k3 | tail -1 > r.txt
+            ID=$(cut -d' ' -f1 r.txt); SHA=$(cut -d' ' -f2 r.txt)
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"; echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - name: Lấy file đã build
         uses: actions/download-artifact@v4
         with:
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.run.outputs.id }}
           github-token: ${{ github.token }}
           path: art
 
@@ -53,7 +68,7 @@ jobs:
       - name: Cập nhật bản phát hành "tai-ve"
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
+          SHA: ${{ steps.run.outputs.sha }}
         run: |
           R="$GITHUB_REPOSITORY"
           NOTES="Bản build tự động mới nhất (commit ${SHA:0:7}, $(TZ=Asia/Ho_Chi_Minh date '+%d/%m/%Y %H:%M')). Link cố định: https://github.com/$R/releases/download/tai-ve/<TEN_FILE>"
