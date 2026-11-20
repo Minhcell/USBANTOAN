@@ -48,18 +48,21 @@ jobs:
         run: |
           mkdir -p out
           REPO="${GITHUB_REPOSITORY#*/}"
+          put() {  # put <file> <name>
+            b=$(echo "$2" | sed -E 's/[-_]build[-_]?[0-9]+//; s/[-_]v?[0-9]+(\.[0-9]+)+//; s/-debug(\.apk)$/\1/')
+            case "$b" in app-debug.apk|app-release.apk|app-release-unsigned.apk|app.apk) b="$REPO.apk";; esac
+            [ -e "out/$b" ] && b="$n-$b"
+            cp "$1" "out/$b"
+          }
           for a in art/*/; do
             n=$(basename "$a")
             case "$n" in github-pages*) continue;; esac
-            cnt=$(find "$a" -type f | wc -l)
-            if [ "$cnt" = "1" ]; then
-              f=$(find "$a" -type f)
-              b=$(basename "$f")
-              case "$b" in app-debug.apk|app-release.apk|app-release-unsigned.apk) b="$REPO.apk";; esac
-              [ -e "out/$b" ] && b="$n-$b"
-              cp "$f" "out/$b"
+            cnt=$(find "$a" -type f | wc -l); top=$(find "$a" -mindepth 1 -maxdepth 1 -type f | wc -l)
+            if [ "$cnt" -le 5 ] && [ "$cnt" = "$top" ]; then
+              for f in "$a"*; do put "$f" "$(basename "$f")"; done
             else
-              (cd "$a" && zip -qr9 "$GITHUB_WORKSPACE/out/$n.zip" .)
+              z=$(echo "$n" | sed -E 's/[-_]build[-_]?[0-9]+//; s/[-_]v?[0-9]+(\.[0-9]+)+//')
+              (cd "$a" && zip -qr9 "$GITHUB_WORKSPACE/out/$z.zip" .)
             fi
           done
           find out -type f -size +1900M -print -delete
@@ -78,5 +81,10 @@ jobs:
             gh release create tai-ve -R "$R" --title "Tải về – bản mới nhất" --notes "$NOTES" --target "$SHA" --latest
           fi
           gh release upload tai-ve out/* -R "$R" --clobber
+          if [ "1" = "1" ]; then  # xoá file cũ không còn dùng
+            gh release view tai-ve -R "$R" --json assets --jq '.assets[].name' | while read -r x; do
+              [ -e "out/$x" ] || gh release delete-asset tai-ve "$x" -R "$R" -y || true
+            done
+          fi
           git init -q t && cd t && git remote add o "https://x-access-token:$GH_TOKEN@github.com/$R" && git fetch -q --depth 1 o "$SHA" && git tag -f tai-ve FETCH_HEAD && git push -qf o refs/tags/tai-ve || true
 
