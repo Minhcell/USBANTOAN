@@ -1,0 +1,67 @@
+name: Tai ve (link co dinh)
+
+# Tự động: mỗi lần bản build ở trên chạy xong thành công, file APK/EXE/HTML
+# được đưa vào bản phát hành "tai-ve" với đường link cố định:
+#   https://github.com/Minhcell/USBANTOAN/releases/download/tai-ve/<TEN_FILE>
+on:
+  workflow_run:
+    workflows:
+      - "Build USB AN TOAN (1 file EXE)"
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: tai-ve
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy file đã build
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: art
+
+      - name: Gom file tải về
+        run: |
+          mkdir -p out
+          REPO="${GITHUB_REPOSITORY#*/}"
+          for a in art/*/; do
+            n=$(basename "$a")
+            case "$n" in github-pages*) continue;; esac
+            cnt=$(find "$a" -type f | wc -l)
+            if [ "$cnt" = "1" ]; then
+              f=$(find "$a" -type f)
+              b=$(basename "$f")
+              case "$b" in app-debug.apk|app-release.apk|app-release-unsigned.apk) b="$REPO.apk";; esac
+              [ -e "out/$b" ] && b="$n-$b"
+              cp "$f" "out/$b"
+            else
+              (cd "$a" && zip -qr9 "$GITHUB_WORKSPACE/out/$n.zip" .)
+            fi
+          done
+          find out -type f -size +1900M -print -delete
+          ls -la out
+
+      - name: Cập nhật bản phát hành "tai-ve"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          R="$GITHUB_REPOSITORY"
+          NOTES="Bản build tự động mới nhất (commit ${SHA:0:7}, $(TZ=Asia/Ho_Chi_Minh date '+%d/%m/%Y %H:%M')). Link cố định: https://github.com/$R/releases/download/tai-ve/<TEN_FILE>"
+          if gh release view tai-ve -R "$R" >/dev/null 2>&1; then
+            gh release edit tai-ve -R "$R" --title "Tải về – bản mới nhất" --notes "$NOTES"
+          else
+            gh release create tai-ve -R "$R" --title "Tải về – bản mới nhất" --notes "$NOTES" --target "$SHA" --latest
+          fi
+          gh release upload tai-ve out/* -R "$R" --clobber
+          git init -q t && cd t && git remote add o "https://x-access-token:$GH_TOKEN@github.com/$R" && git fetch -q --depth 1 o "$SHA" && git tag -f tai-ve FETCH_HEAD && git push -qf o refs/tags/tai-ve || true
+
